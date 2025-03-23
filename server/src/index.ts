@@ -29,9 +29,9 @@ connectDB();
 // Connect to Redis
 connectRedis();
 
-// Configure CORS - Update to fix the CORS issues
+// Configure CORS
 const corsOptions = {
-  origin: ENV.CORS_ORIGIN || '*', // Allow any origin in production for testing, should be specific in real deployment
+  origin: ENV.CORS_ORIGIN === '*' ? '*' : [ENV.CORS_ORIGIN, 'https://solmegle.onrender.com'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
@@ -83,13 +83,31 @@ app.get('/health', (req, res) => {
     videoCount = files.filter(file => file.endsWith('.mp4')).length;
   }
   
+  // Check if index.html exists
+  const indexExists = fs.existsSync(path.join(publicDir, 'index.html'));
+  
   res.status(200).json({ 
     status: 'ok',
     environment: ENV.NODE_ENV,
     publicDirectoryExists: publicExists,
     videosDirectoryExists: videosExist,
+    indexHtmlExists: indexExists,
     videoCount: videoCount,
-    videosDir: videosDir
+    videosDir: videosDir,
+    publicDir: publicDir,
+    corsOrigin: ENV.CORS_ORIGIN
+  });
+});
+
+// CORS debugger endpoint
+app.get('/debug/cors', (req, res) => {
+  res.status(200).json({
+    corsOptions,
+    headers: req.headers,
+    origin: req.headers.origin,
+    clientAllowed: !corsOptions.origin || corsOptions.origin === '*' || 
+      (Array.isArray(corsOptions.origin) && req.headers.origin && 
+      corsOptions.origin.includes(req.headers.origin))
   });
 });
 
@@ -104,6 +122,51 @@ if (ENV.NODE_ENV === 'production') {
   const videosDir = path.join(publicDir, 'videos');
   logger.info(`Serving videos from: ${videosDir}`);
   app.use('/videos', express.static(videosDir));
+
+  // Create an empty index.html if it doesn't exist
+  const indexPath = path.join(publicDir, 'index.html');
+  if (!fs.existsSync(indexPath)) {
+    logger.warn(`index.html not found at ${indexPath}, creating a basic one...`);
+    const basicHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Solmegle</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+    h1 { color: #333; }
+    a { color: #0066cc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Solmegle Video Chat</h1>
+  <p>Welcome to Solmegle!</p>
+  <div id="root"></div>
+  <script>
+    // Check if static files exist and redirect if needed
+    fetch('/static/js/main.b31c2b4c.js')
+      .then(response => {
+        if (response.ok) {
+          // Load the main script
+          const script = document.createElement('script');
+          script.src = '/static/js/main.b31c2b4c.js';
+          document.body.appendChild(script);
+        }
+      })
+      .catch(err => console.error('Error loading app:', err));
+  </script>
+</body>
+</html>`;
+    
+    try {
+      fs.writeFileSync(indexPath, basicHtml);
+      logger.info('Created basic index.html');
+    } catch (error) {
+      logger.error('Failed to create index.html', error);
+    }
+  }
 
   // All other routes should redirect to index.html
   app.get('*', (req, res) => {

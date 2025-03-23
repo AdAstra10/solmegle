@@ -6,9 +6,41 @@ npm install
 # Skip the reinstall of bcrypt during build (done in postinstall instead)
 # We'll focus on videos for now
 
-# Deploy static assets
+# Build client and server (if not already done by postinstall)
+if [ ! -d "client/build" ]; then
+  echo "Building client..."
+  cd client && npm run build && cd ..
+fi
+
+# Ensure server directory exists
 mkdir -p server/public
+
+# Copy client build to server/public
+echo "Copying client build to server/public..."
 cp -r client/build/* server/public/
+
+# For debugging, list what's in server/public
+echo "Contents of server/public:"
+ls -la server/public/
+
+# Check if index.html exists
+if [ ! -f "server/public/index.html" ]; then
+  echo "index.html not found in server/public, creating..."
+  # Create a minimal index.html file
+  echo '<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Solmegle</title>
+  <link rel="stylesheet" href="/static/css/main.e6c13ad2.css" />
+</head>
+<body>
+  <div id="root"></div>
+  <script src="/static/js/main.b31c2b4c.js"></script>
+</body>
+</html>' > server/public/index.html
+fi
 
 # Make sure videos directory exists and is populated
 mkdir -p server/public/videos
@@ -53,4 +85,11 @@ chmod -R 755 server/public/videos
 
 # For debugging purposes
 echo "Final contents of server/public/videos:"
-ls -la server/public/videos/ 
+ls -la server/public/videos/
+
+# Double-check that index.html exists in the final location
+if [ -f "server/public/index.html" ]; then
+  echo "index.html is present in server/public/"
+else
+  echo "WARNING: index.html is still missing from server/public/"
+fi 
