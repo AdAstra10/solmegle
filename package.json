@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server/dist/index.js",
     "build": "chmod +x build.sh && ./build.sh",
+    "render-build": "chmod +x render-build.sh && ./render-build.sh",
     "install-client": "cd client && npm install",
     "install-server": "cd server && npm install",
     "build-client": "cd client && npm run build",

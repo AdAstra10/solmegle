@@ -2,12 +2,16 @@ services:
   - type: web
     name: solmegle
     env: node
-    buildCommand: ./build.sh
-    startCommand: chmod +x ./render_start.sh && ./render_start.sh
+    region: ohio
+    plan: free
+    buildCommand: npm run render-build
+    startCommand: node server/dist/index.js
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: 10000
       - key: JWT_SECRET
         generateValue: true
       - key: MONGODB_URI
