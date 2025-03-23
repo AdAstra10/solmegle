@@ -4,8 +4,8 @@ services:
     env: node
     region: ohio
     plan: free
-    buildCommand: npm run render-build
-    startCommand: npm start
+    buildCommand: npm run install-client && npm run install-server && npm run build-client && npm run build-server
+    startCommand: chmod +x ./render-start.sh && ./render-start.sh
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV

@@ -94,13 +94,19 @@ const ensurePublicDirectories = () => {
   const clientBuildExists = fs.existsSync(clientBuildDir);
   const clientIndexExists = fs.existsSync(path.join(clientBuildDir, 'index.html'));
   
-  if (clientBuildExists && clientIndexExists) {
-    logger.info(`Found React build files at ${clientBuildDir}, copying to public directory...`);
+  // Also check the exact Render.com path
+  const renderClientBuildDir = '/opt/render/project/src/client/build';
+  const renderClientBuildExists = fs.existsSync(renderClientBuildDir);
+  const renderClientIndexExists = renderClientBuildExists && fs.existsSync(path.join(renderClientBuildDir, 'index.html'));
+  
+  if ((clientBuildExists && clientIndexExists) || (renderClientBuildExists && renderClientIndexExists)) {
+    const sourceBuildDir = renderClientBuildExists ? renderClientBuildDir : clientBuildDir;
+    logger.info(`Found React build files at ${sourceBuildDir}, copying to public directory...`);
     try {
       // Copy all build files
-      const files = fs.readdirSync(clientBuildDir);
+      const files = fs.readdirSync(sourceBuildDir);
       files.forEach(file => {
-        const srcPath = path.join(clientBuildDir, file);
+        const srcPath = path.join(sourceBuildDir, file);
         const destPath = path.join(ENV.PUBLIC_DIR, file);
         
         if (fs.statSync(srcPath).isDirectory()) {
@@ -128,7 +134,7 @@ const ensurePublicDirectories = () => {
       logger.error(`Failed to copy React build files: ${error}`);
     }
   } else {
-    logger.warn(`React build files not found at ${clientBuildDir}, will use basic index.html`);
+    logger.warn(`React build files not found at ${clientBuildDir} or ${renderClientBuildDir}, will use basic index.html`);
   }
 
   // Create an empty index.html if it doesn't exist
