@@ -35,7 +35,7 @@ services:
       - PORT=5000
       - MONGODB_URI=mongodb://mongo:27017/flexrocket
       - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=your-secret-key-change-in-production
+      - JWT_SECRET=<your-jwt-secret-here-change-in-production>
       - JWT_EXPIRES_IN=7d
       - CORS_ORIGIN=http://localhost:3000
       - LOG_LEVEL=info
