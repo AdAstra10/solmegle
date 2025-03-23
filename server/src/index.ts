@@ -14,7 +14,7 @@ import { notFound, errorHandler } from './middleware/errorHandler';
 import userRoutes from './routes/userRoutes';
 import VideoChatService from './services/videoChatService';
 import logger from './utils/logger';
-import { serveStaticFile, serveIndexForRoutes } from './middleware/staticFileMiddleware';
+import { setupStaticFiles } from './static-handler';
 
 // Initialize Express app
 const app = express();
@@ -226,47 +226,8 @@ if (ENV.NODE_ENV === 'production') {
   // Ensure directories and index.html exist
   ensurePublicDirectories();
   
-  // Set up Express to properly serve static files with correct MIME types
-  const staticOptions = {
-    maxAge: '1d',
-    setHeaders: (res: express.Response, path: string) => {
-      // Set proper MIME types for JS and CSS files
-      if (path.endsWith('.js')) {
-        res.setHeader('Content-Type', 'application/javascript');
-      } else if (path.endsWith('.css')) {
-        res.setHeader('Content-Type', 'text/css');
-      } else if (path.endsWith('.json')) {
-        res.setHeader('Content-Type', 'application/json');
-      } else if (path.endsWith('.png')) {
-        res.setHeader('Content-Type', 'image/png');
-      } else if (path.endsWith('.jpg') || path.endsWith('.jpeg')) {
-        res.setHeader('Content-Type', 'image/jpeg');
-      } else if (path.endsWith('.svg')) {
-        res.setHeader('Content-Type', 'image/svg+xml');
-      } else if (path.endsWith('.mp4')) {
-        res.setHeader('Content-Type', 'video/mp4');
-      }
-    }
-  };
-  
-  // Set static folder
-  logger.info(`Serving static files from: ${ENV.PUBLIC_DIR}`);
-  app.use(express.static(ENV.PUBLIC_DIR, staticOptions));
-  
-  // Serve videos directory
-  const videosDir = path.join(ENV.PUBLIC_DIR, 'videos');
-  logger.info(`Serving videos from: ${videosDir}`);
-  app.use('/videos', express.static(videosDir, staticOptions));
-
-  // Fallback to custom static file serving middleware for JS and CSS files
-  // This is a backup in case Express static middleware doesn't set MIME types correctly
-  logger.info('Setting up fallback static file middleware');
-  app.use('/static/js', serveStaticFile(path.join(ENV.PUBLIC_DIR, 'static/js')));
-  app.use('/static/css', serveStaticFile(path.join(ENV.PUBLIC_DIR, 'static/css')));
-  app.use('/static/media', serveStaticFile(path.join(ENV.PUBLIC_DIR, 'static/media')));
-  
-  // All other routes should redirect to index.html
-  app.get('*', serveIndexForRoutes(ENV.PUBLIC_DIR));
+  // Setup static file handling
+  setupStaticFiles(app, ENV.PUBLIC_DIR);
 } else {
   // For development, specifically serve the videos folder
   app.use('/videos', express.static(path.join(ENV.PUBLIC_DIR, 'videos')));
