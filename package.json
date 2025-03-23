@@ -13,7 +13,7 @@
     "postinstall": "npm run install-client && npm run install-server && npm run build-client && npm run build-server"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": "18.x"
   },
   "keywords": [
     "video",

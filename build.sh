@@ -3,6 +3,12 @@
 # Install dependencies
 npm install
 
+# Reinstall bcrypt to fix binary compatibility issues
+cd server
+npm uninstall bcrypt
+npm install bcrypt
+cd ..
+
 # Build client and server (this will be done via the postinstall script)
 # Deploy static assets
 mkdir -p server/public
