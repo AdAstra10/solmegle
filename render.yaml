@@ -3,7 +3,7 @@ services:
     name: solmegle
     env: node
     buildCommand: ./build.sh
-    startCommand: npm start
+    startCommand: chmod +x ./render_start.sh && ./render_start.sh
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV

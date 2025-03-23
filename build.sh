@@ -3,13 +3,9 @@
 # Install dependencies
 npm install
 
-# Reinstall bcrypt to fix binary compatibility issues
-cd server
-npm uninstall bcrypt
-npm install bcrypt
-cd ..
+# Skip the reinstall of bcrypt during build (done in postinstall instead)
+# We'll focus on videos for now
 
-# Build client and server (this will be done via the postinstall script)
 # Deploy static assets
 mkdir -p server/public
 cp -r client/build/* server/public/
