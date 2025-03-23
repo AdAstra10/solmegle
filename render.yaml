@@ -5,7 +5,7 @@ services:
     region: ohio
     plan: free
     buildCommand: npm run render-build
-    startCommand: node server/dist/index.js
+    startCommand: npm start
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV

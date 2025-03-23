@@ -4,7 +4,7 @@
   "description": "Solmegle video chat application",
   "main": "server/dist/index.js",
   "scripts": {
-    "start": "node server/dist/index.js",
+    "start": "node copy-react-build.js && node server/dist/index.js",
     "build": "chmod +x build.sh && ./build.sh",
     "render-build": "chmod +x render-build.sh && ./render-build.sh",
     "install-client": "cd client && npm install",

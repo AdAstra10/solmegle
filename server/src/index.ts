@@ -89,6 +89,48 @@ const ensurePublicDirectories = () => {
     }
   }
 
+  // Look for React build files
+  const clientBuildDir = path.join(__dirname, '../../../client/build');
+  const clientBuildExists = fs.existsSync(clientBuildDir);
+  const clientIndexExists = fs.existsSync(path.join(clientBuildDir, 'index.html'));
+  
+  if (clientBuildExists && clientIndexExists) {
+    logger.info(`Found React build files at ${clientBuildDir}, copying to public directory...`);
+    try {
+      // Copy all build files
+      const files = fs.readdirSync(clientBuildDir);
+      files.forEach(file => {
+        const srcPath = path.join(clientBuildDir, file);
+        const destPath = path.join(ENV.PUBLIC_DIR, file);
+        
+        if (fs.statSync(srcPath).isDirectory()) {
+          // If it's a directory, copy recursively
+          if (!fs.existsSync(destPath)) {
+            fs.mkdirSync(destPath, { recursive: true });
+          }
+          
+          const dirFiles = fs.readdirSync(srcPath);
+          dirFiles.forEach(dirFile => {
+            const dirSrcPath = path.join(srcPath, dirFile);
+            const dirDestPath = path.join(destPath, dirFile);
+            if (fs.statSync(dirSrcPath).isFile()) {
+              fs.copyFileSync(dirSrcPath, dirDestPath);
+            }
+          });
+        } else {
+          // Simple file copy
+          fs.copyFileSync(srcPath, destPath);
+        }
+      });
+      logger.info('Successfully copied React build files to public directory');
+      return; // Exit early, no need to create a basic index.html
+    } catch (error) {
+      logger.error(`Failed to copy React build files: ${error}`);
+    }
+  } else {
+    logger.warn(`React build files not found at ${clientBuildDir}, will use basic index.html`);
+  }
+
   // Create an empty index.html if it doesn't exist
   const indexPath = path.join(ENV.PUBLIC_DIR, 'index.html');
   if (!fs.existsSync(indexPath)) {
