@@ -90,6 +90,29 @@ if [ -n "$CLIENT_BUILD" ]; then
   echo "Copying files..."
   cp -r "$CLIENT_BUILD"/* "$PUBLIC_DIR/"
   
+  # Set proper file permissions and create .htaccess file for MIME types
+  echo "Setting correct file permissions..."
+  find "$PUBLIC_DIR" -type f -name "*.js" -exec chmod 644 {} \;
+  find "$PUBLIC_DIR" -type f -name "*.css" -exec chmod 644 {} \;
+  find "$PUBLIC_DIR" -type f -name "*.html" -exec chmod 644 {} \;
+  find "$PUBLIC_DIR" -type f -name "*.json" -exec chmod 644 {} \;
+  find "$PUBLIC_DIR" -type f -name "*.png" -exec chmod 644 {} \;
+  find "$PUBLIC_DIR" -type f -name "*.jpg" -exec chmod 644 {} \;
+  find "$PUBLIC_DIR" -type f -name "*.svg" -exec chmod 644 {} \;
+  
+  # Create a .htaccess file with MIME type definitions (Express will ignore this, but it's good practice)
+  echo "Creating .htaccess file with MIME types..."
+  cat > "$PUBLIC_DIR/.htaccess" << EOF
+# MIME Types
+AddType application/javascript .js
+AddType text/css .css
+AddType application/json .json
+AddType image/png .png
+AddType image/jpeg .jpg .jpeg
+AddType image/svg+xml .svg
+AddType video/mp4 .mp4
+EOF
+  
   # Verify key files
   if [ -f "$PUBLIC_DIR/index.html" ]; then
     echo "✅ index.html copied successfully"
@@ -101,6 +124,21 @@ if [ -n "$CLIENT_BUILD" ]; then
   if [ -d "$PUBLIC_DIR/static" ]; then
     echo "✅ static directory copied successfully"
     ls -la "$PUBLIC_DIR/static"
+    
+    # Check JS and CSS files specifically
+    if [ -d "$PUBLIC_DIR/static/js" ]; then
+      echo "JS files:"
+      ls -la "$PUBLIC_DIR/static/js"
+      echo "Checking first JS file content type:"
+      file $(find "$PUBLIC_DIR/static/js" -name "*.js" | head -1)
+    fi
+    
+    if [ -d "$PUBLIC_DIR/static/css" ]; then
+      echo "CSS files:"
+      ls -la "$PUBLIC_DIR/static/css"
+      echo "Checking first CSS file content type:"
+      file $(find "$PUBLIC_DIR/static/css" -name "*.css" | head -1)
+    fi
   else
     echo "❌ Failed to copy static directory"
   fi
