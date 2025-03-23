@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import { rateLimit } from 'express-rate-limit';
 import path from 'path';
+import fs from 'fs';
 import connectDB from './config/database';
 import { connectRedis } from './config/redis';
 import ENV from './config/environment';
@@ -18,6 +19,10 @@ import logger from './utils/logger';
 const app = express();
 const server = http.createServer(app);
 
+// Debug information
+logger.info(`Starting server in ${ENV.NODE_ENV} mode on port ${ENV.PORT}`);
+logger.info(`CORS_ORIGIN set to: ${ENV.CORS_ORIGIN}`);
+
 // Connect to MongoDB
 connectDB();
 
@@ -26,7 +31,7 @@ connectRedis();
 
 // Configure CORS - Update to fix the CORS issues
 const corsOptions = {
-  origin: ENV.CORS_ORIGIN || 'http://localhost:3000',
+  origin: ENV.CORS_ORIGIN || '*', // Allow any origin in production for testing, should be specific in real deployment
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
@@ -63,20 +68,63 @@ app.use('/api/users', userRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
+  // Check for static files
+  const publicDir = path.join(__dirname, '../../public');
+  const videosDir = path.join(publicDir, 'videos');
+  
+  // Check if directories exist
+  const publicExists = fs.existsSync(publicDir);
+  const videosExist = fs.existsSync(videosDir);
+  
+  // Count video files
+  let videoCount = 0;
+  if (videosExist) {
+    const files = fs.readdirSync(videosDir);
+    videoCount = files.filter(file => file.endsWith('.mp4')).length;
+  }
+  
+  res.status(200).json({ 
+    status: 'ok',
+    environment: ENV.NODE_ENV,
+    publicDirectoryExists: publicExists,
+    videosDirectoryExists: videosExist,
+    videoCount: videoCount
+  });
+});
+
+// Debug endpoint to check video files
+app.get('/debug/videos', (req, res) => {
+  const videosDir = path.join(__dirname, '../../public/videos');
+  
+  if (!fs.existsSync(videosDir)) {
+    return res.status(404).json({ error: 'Videos directory not found' });
+  }
+  
+  const files = fs.readdirSync(videosDir);
+  const videoFiles = files.filter(file => file.endsWith('.mp4'));
+  
+  res.status(200).json({ 
+    videosDirectory: videosDir,
+    count: videoFiles.length,
+    videos: videoFiles
+  });
 });
 
 // Serve static assets in production
 if (ENV.NODE_ENV === 'production') {
   // Set static folder
-  app.use(express.static(path.join(__dirname, '../../public')));
+  const publicDir = path.join(__dirname, '../../public');
+  logger.info(`Serving static files from: ${publicDir}`);
+  app.use(express.static(publicDir));
   
   // Serve videos directory
-  app.use('/videos', express.static(path.join(__dirname, '../../public/videos')));
+  const videosDir = path.join(publicDir, 'videos');
+  logger.info(`Serving videos from: ${videosDir}`);
+  app.use('/videos', express.static(videosDir));
 
   // All other routes should redirect to index.html
   app.get('*', (req, res) => {
-    res.sendFile(path.resolve(__dirname, '../../public', 'index.html'));
+    res.sendFile(path.resolve(publicDir, 'index.html'));
   });
 } else {
   // For development, specifically serve the videos folder

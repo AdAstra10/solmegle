@@ -9,7 +9,7 @@ node_modules
 # production
 /build
 /client/build
-/client/build/videos/
+!/client/build/videos/README.md
 
 # misc
 .DS_Store
@@ -34,7 +34,9 @@ yarn-error.log*
 # Deployment files
 deploy.zip
 
-# Media files
+# Media files - except for placeholder files
 client/public/videos/*.mp4
 client/build/videos/*.mp4
-**/*.mp4 
+**/*.mp4
+!client/public/videos/placeholder.mp4
+!server/public/videos/placeholder.mp4 
