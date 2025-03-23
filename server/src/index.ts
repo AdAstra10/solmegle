@@ -88,25 +88,8 @@ app.get('/health', (req, res) => {
     environment: ENV.NODE_ENV,
     publicDirectoryExists: publicExists,
     videosDirectoryExists: videosExist,
-    videoCount: videoCount
-  });
-});
-
-// Debug endpoint to check video files
-app.get('/debug/videos', (req, res) => {
-  const videosDir = path.join(__dirname, '../../public/videos');
-  
-  if (!fs.existsSync(videosDir)) {
-    return res.status(404).json({ error: 'Videos directory not found' });
-  }
-  
-  const files = fs.readdirSync(videosDir);
-  const videoFiles = files.filter(file => file.endsWith('.mp4'));
-  
-  res.status(200).json({ 
-    videosDirectory: videosDir,
-    count: videoFiles.length,
-    videos: videoFiles
+    videoCount: videoCount,
+    videosDir: videosDir
   });
 });
 
