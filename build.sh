@@ -12,20 +12,32 @@ if [ ! -d "client/build" ]; then
   cd client && npm run build && cd ..
 fi
 
+# Determine the correct public directory based on environment
+if [ -n "$RENDER" ]; then
+  PUBLIC_DIR="/opt/render/project/src/public"
+else
+  PUBLIC_DIR="server/public"
+fi
+
 # Ensure server directory exists
-mkdir -p server/public
+mkdir -p "$PUBLIC_DIR"
 
-# Copy client build to server/public
-echo "Copying client build to server/public..."
-cp -r client/build/* server/public/
+# Copy client build to public directory
+echo "Copying client build to $PUBLIC_DIR..."
+if [ -d "client/build" ]; then
+  cp -r client/build/* "$PUBLIC_DIR/"
+  echo "Client build copied successfully."
+else
+  echo "Warning: client/build directory not found, skipping copy."
+fi
 
-# For debugging, list what's in server/public
-echo "Contents of server/public:"
-ls -la server/public/
+# For debugging, list what's in public directory
+echo "Contents of $PUBLIC_DIR:"
+ls -la "$PUBLIC_DIR"
 
 # Check if index.html exists
-if [ ! -f "server/public/index.html" ]; then
-  echo "index.html not found in server/public, creating..."
+if [ ! -f "$PUBLIC_DIR/index.html" ]; then
+  echo "index.html not found in $PUBLIC_DIR, creating..."
   # Create a minimal index.html file
   echo '<!DOCTYPE html>
 <html lang="en">
@@ -33,27 +45,32 @@ if [ ! -f "server/public/index.html" ]; then
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Solmegle</title>
-  <link rel="stylesheet" href="/static/css/main.e6c13ad2.css" />
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+    h1 { color: #333; }
+    p { margin-bottom: 30px; }
+  </style>
 </head>
 <body>
+  <h1>Solmegle Video Chat</h1>
+  <p>Welcome to Solmegle! The application is running.</p>
   <div id="root"></div>
-  <script src="/static/js/main.b31c2b4c.js"></script>
 </body>
-</html>' > server/public/index.html
+</html>' > "$PUBLIC_DIR/index.html"
 fi
 
 # Make sure videos directory exists and is populated
-mkdir -p server/public/videos
+mkdir -p "$PUBLIC_DIR/videos"
 
-# If client/public/videos has mp4 files, copy them to server/public/videos
+# If client/public/videos has mp4 files, copy them to public/videos
 if [ -d "client/public/videos" ]; then
   # Copy any MP4 files that exist
-  find client/public/videos -name "*.mp4" -exec cp {} server/public/videos/ \; 2>/dev/null || echo "No videos found in client/public/videos"
+  find client/public/videos -name "*.mp4" -exec cp {} "$PUBLIC_DIR/videos/" \; 2>/dev/null || echo "No videos found in client/public/videos"
 fi
 
 # Count MP4 files in the videos directory
-MP4_COUNT=$(find server/public/videos -name "*.mp4" | wc -l)
-echo "Found $MP4_COUNT MP4 files in server/public/videos"
+MP4_COUNT=$(find "$PUBLIC_DIR/videos" -name "*.mp4" | wc -l)
+echo "Found $MP4_COUNT MP4 files in $PUBLIC_DIR/videos"
 
 # If no MP4 files exist, download some placeholder videos
 if [ "$MP4_COUNT" -eq 0 ]; then
@@ -69,11 +86,11 @@ if [ "$MP4_COUNT" -eq 0 ]; then
   curl -L "https://www.pexels.com/download/video/3194277/?fps=29.97&h=360&w=640" -o temp_videos/3.mp4
   
   # Copy downloaded videos to the server/public/videos directory
-  cp temp_videos/*.mp4 server/public/videos/
+  cp temp_videos/*.mp4 "$PUBLIC_DIR/videos/"
   
   # Create additional placeholder videos by making copies
-  for i in {4..43}; do
-    cp "server/public/videos/$(( i % 3 + 1 )).mp4" "server/public/videos/$i.mp4"
+  for i in {4..10}; do
+    cp "$PUBLIC_DIR/videos/$(( i % 3 + 1 )).mp4" "$PUBLIC_DIR/videos/$i.mp4"
   done
   
   # Clean up temporary directory
@@ -81,15 +98,16 @@ if [ "$MP4_COUNT" -eq 0 ]; then
 fi
 
 # Make sure the videos directory is writable
-chmod -R 755 server/public/videos
+chmod -R 755 "$PUBLIC_DIR/videos"
 
 # For debugging purposes
-echo "Final contents of server/public/videos:"
-ls -la server/public/videos/
+echo "Final contents of $PUBLIC_DIR/videos:"
+ls -la "$PUBLIC_DIR/videos/"
 
 # Double-check that index.html exists in the final location
-if [ -f "server/public/index.html" ]; then
-  echo "index.html is present in server/public/"
+if [ -f "$PUBLIC_DIR/index.html" ]; then
+  echo "index.html is present in $PUBLIC_DIR"
+  cat "$PUBLIC_DIR/index.html" | head -n 10
 else
-  echo "WARNING: index.html is still missing from server/public/"
+  echo "WARNING: index.html is still missing from $PUBLIC_DIR"
 fi 

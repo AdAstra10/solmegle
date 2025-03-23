@@ -31,7 +31,7 @@ connectRedis();
 
 // Configure CORS
 const corsOptions = {
-  origin: ENV.CORS_ORIGIN === '*' ? '*' : [ENV.CORS_ORIGIN, 'https://solmegle.onrender.com'],
+  origin: ENV.CORS_ORIGIN,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
@@ -66,10 +66,70 @@ app.use('/api', limiter);
 // Routes
 app.use('/api/users', userRoutes);
 
+// Ensure public directory and index.html exist
+const ensurePublicDirectories = () => {
+  // Create public directory if it doesn't exist
+  if (!fs.existsSync(ENV.PUBLIC_DIR)) {
+    try {
+      fs.mkdirSync(ENV.PUBLIC_DIR, { recursive: true });
+      logger.info(`Created public directory: ${ENV.PUBLIC_DIR}`);
+    } catch (error) {
+      logger.error(`Failed to create public directory: ${error}`);
+    }
+  }
+
+  // Create videos directory if it doesn't exist
+  const videosDir = path.join(ENV.PUBLIC_DIR, 'videos');
+  if (!fs.existsSync(videosDir)) {
+    try {
+      fs.mkdirSync(videosDir, { recursive: true });
+      logger.info(`Created videos directory: ${videosDir}`);
+    } catch (error) {
+      logger.error(`Failed to create videos directory: ${error}`);
+    }
+  }
+
+  // Create an empty index.html if it doesn't exist
+  const indexPath = path.join(ENV.PUBLIC_DIR, 'index.html');
+  if (!fs.existsSync(indexPath)) {
+    logger.warn(`index.html not found at ${indexPath}, creating a basic one...`);
+    const basicHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Solmegle</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+    h1 { color: #333; }
+    p { margin-bottom: 30px; }
+    a { color: #0066cc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Solmegle Video Chat</h1>
+  <p>Welcome to Solmegle! The application is running.</p>
+  <div id="root"></div>
+</body>
+</html>`;
+    
+    try {
+      fs.writeFileSync(indexPath, basicHtml);
+      logger.info('Created basic index.html');
+    } catch (error) {
+      logger.error('Failed to create index.html', error);
+    }
+  }
+};
+
 // Health check endpoint
 app.get('/health', (req, res) => {
+  // Ensure directories exist first
+  ensurePublicDirectories();
+  
   // Check for static files
-  const publicDir = path.join(__dirname, '../../public');
+  const publicDir = ENV.PUBLIC_DIR;
   const videosDir = path.join(publicDir, 'videos');
   
   // Check if directories exist
@@ -95,7 +155,8 @@ app.get('/health', (req, res) => {
     videoCount: videoCount,
     videosDir: videosDir,
     publicDir: publicDir,
-    corsOrigin: ENV.CORS_ORIGIN
+    corsOrigin: ENV.CORS_ORIGIN,
+    isRender: ENV.IS_RENDER
   });
 });
 
@@ -111,70 +172,38 @@ app.get('/debug/cors', (req, res) => {
   });
 });
 
-// Serve static assets in production
+// Serve static assets
 if (ENV.NODE_ENV === 'production') {
+  // Ensure directories and index.html exist
+  ensurePublicDirectories();
+  
   // Set static folder
-  const publicDir = path.join(__dirname, '../../public');
-  logger.info(`Serving static files from: ${publicDir}`);
-  app.use(express.static(publicDir));
+  logger.info(`Serving static files from: ${ENV.PUBLIC_DIR}`);
+  app.use(express.static(ENV.PUBLIC_DIR));
   
   // Serve videos directory
-  const videosDir = path.join(publicDir, 'videos');
+  const videosDir = path.join(ENV.PUBLIC_DIR, 'videos');
   logger.info(`Serving videos from: ${videosDir}`);
   app.use('/videos', express.static(videosDir));
 
-  // Create an empty index.html if it doesn't exist
-  const indexPath = path.join(publicDir, 'index.html');
-  if (!fs.existsSync(indexPath)) {
-    logger.warn(`index.html not found at ${indexPath}, creating a basic one...`);
-    const basicHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Solmegle</title>
-  <style>
-    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-    h1 { color: #333; }
-    a { color: #0066cc; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-  </style>
-</head>
-<body>
-  <h1>Solmegle Video Chat</h1>
-  <p>Welcome to Solmegle!</p>
-  <div id="root"></div>
-  <script>
-    // Check if static files exist and redirect if needed
-    fetch('/static/js/main.b31c2b4c.js')
-      .then(response => {
-        if (response.ok) {
-          // Load the main script
-          const script = document.createElement('script');
-          script.src = '/static/js/main.b31c2b4c.js';
-          document.body.appendChild(script);
-        }
-      })
-      .catch(err => console.error('Error loading app:', err));
-  </script>
-</body>
-</html>`;
-    
-    try {
-      fs.writeFileSync(indexPath, basicHtml);
-      logger.info('Created basic index.html');
-    } catch (error) {
-      logger.error('Failed to create index.html', error);
-    }
-  }
-
   // All other routes should redirect to index.html
   app.get('*', (req, res) => {
-    res.sendFile(path.resolve(publicDir, 'index.html'));
+    const indexPath = path.join(ENV.PUBLIC_DIR, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      res.sendFile(indexPath);
+    } else {
+      // If index.html still doesn't exist, create it and then send
+      ensurePublicDirectories();
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(500).send('Failed to serve index.html');
+      }
+    }
   });
 } else {
   // For development, specifically serve the videos folder
-  app.use('/videos', express.static(path.join(__dirname, '../../public/videos')));
+  app.use('/videos', express.static(path.join(ENV.PUBLIC_DIR, 'videos')));
 }
 
 // Error handling

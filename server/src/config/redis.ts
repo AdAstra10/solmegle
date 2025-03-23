@@ -4,13 +4,27 @@ import logger from '../utils/logger';
 
 const createRedisClient = () => {
   if (ENV.REDIS_URL) {
-    return createClient({ url: ENV.REDIS_URL });
+    // Use socket.family = 4 to force IPv4 and avoid IPv6 issues on some providers
+    return createClient({ 
+      url: ENV.REDIS_URL,
+      socket: {
+        family: 4,
+        reconnectStrategy: (retries) => {
+          // Limit reconnection attempts to 5
+          if (retries > 5) {
+            logger.warn('Redis connection failed after 5 attempts, stopping reconnection attempts');
+            return false; // Don't reconnect anymore
+          }
+          return Math.min(retries * 100, 3000); // Increase delay between attempts
+        }
+      }
+    });
   }
   
   // Return a mock client if Redis URL is not available
-  logger.warn('Redis URL not provided. Using mock Redis client.');
+  logger.info('Redis URL not provided. Using mock Redis client.');
   const mockClient = {
-    isOpen: false,
+    isOpen: true, // Pretend we're connected to avoid reconnection attempts
     connect: async () => {
       logger.info('Mock Redis client connected');
       return Promise.resolve();

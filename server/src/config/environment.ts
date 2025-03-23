@@ -1,4 +1,6 @@
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -12,6 +14,12 @@ const getRenderUrl = () => {
     const subdomain = isStaging ? `${serviceId}-staging` : serviceId;
     return `https://${subdomain}.onrender.com`;
   }
+  
+  // Also check for RENDER_EXTERNAL_URL which is set by Render
+  if (process.env.RENDER_EXTERNAL_URL) {
+    return process.env.RENDER_EXTERNAL_URL;
+  }
+  
   return null;
 };
 
@@ -26,12 +34,38 @@ const getCorsOrigin = () => {
   if (process.env.NODE_ENV === 'production') {
     const renderUrl = getRenderUrl();
     if (renderUrl) {
-      return renderUrl;
+      return [renderUrl, 'https://solmegle.onrender.com'];
     }
+    // If we're in production but don't have Render URL, allow all origins
+    return '*';
   }
   
   // Default for development
   return 'http://localhost:3000';
+};
+
+// Get the path to the public directory
+const getPublicDir = () => {
+  const defaultPath = path.join(__dirname, '../../../public');
+  
+  // Check if we're on Render
+  if (process.env.RENDER) {
+    // Render stores the app at /opt/render/project/src
+    const renderPath = '/opt/render/project/src/public';
+    
+    // Ensure the directory exists
+    if (!fs.existsSync(renderPath)) {
+      try {
+        fs.mkdirSync(renderPath, { recursive: true });
+      } catch (error) {
+        console.error('Failed to create public directory:', error);
+      }
+    }
+    
+    return renderPath;
+  }
+  
+  return defaultPath;
 };
 
 const ENV = {
@@ -53,6 +87,9 @@ const ENV = {
   RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10), // 15 minutes
   RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX || '100', 10), // 100 requests per window
   RENDER_SERVICE_ID: process.env.RENDER_SERVICE_ID || '',
+  RENDER_EXTERNAL_URL: process.env.RENDER_EXTERNAL_URL || '',
+  IS_RENDER: !!process.env.RENDER,
+  PUBLIC_DIR: getPublicDir(),
 };
 
 export default ENV; 
