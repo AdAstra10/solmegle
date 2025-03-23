@@ -15,6 +15,9 @@ import userRoutes from './routes/userRoutes';
 import VideoChatService from './services/videoChatService';
 import logger from './utils/logger';
 import { setupStaticFiles } from './static-handler';
+import compression from 'compression';
+import session from 'express-session';
+import mongoStore from 'connect-mongo';
 
 // Initialize Express app
 const app = express();
@@ -174,39 +177,112 @@ const ensurePublicDirectories = () => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  // Ensure directories exist first
-  ensurePublicDirectories();
-  
-  // Check for static files
-  const publicDir = ENV.PUBLIC_DIR;
+  const publicDir = path.join(__dirname, '../../public');
   const videosDir = path.join(publicDir, 'videos');
+  const indexFile = path.join(publicDir, 'index.html');
+
+  const result = {
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV,
+    publicDir: {
+      exists: fs.existsSync(publicDir),
+      isDirectory: fs.existsSync(publicDir) && fs.statSync(publicDir).isDirectory(),
+    },
+    videosDir: {
+      exists: fs.existsSync(videosDir),
+      isDirectory: fs.existsSync(videosDir) && fs.statSync(videosDir).isDirectory(),
+      files: fs.existsSync(videosDir) && fs.statSync(videosDir).isDirectory() 
+        ? fs.readdirSync(videosDir).length 
+        : 0
+    },
+    indexHtml: {
+      exists: fs.existsSync(indexFile),
+      isFile: fs.existsSync(indexFile) && fs.statSync(indexFile).isFile(),
+      size: fs.existsSync(indexFile) && fs.statSync(indexFile).isFile() 
+        ? fs.statSync(indexFile).size 
+        : 0
+    }
+  };
+
+  res.json(result);
+});
+
+// Add a diagnostic endpoint for static files
+app.get('/debug/static-files', (req, res) => {
+  const publicDir = path.join(__dirname, '../../public');
+  const staticDir = path.join(publicDir, 'static');
+  const staticJsDir = path.join(staticDir, 'js');
+  const staticCssDir = path.join(staticDir, 'css');
+  const indexFile = path.join(publicDir, 'index.html');
+  const assetManifestFile = path.join(publicDir, 'asset-manifest.json');
   
-  // Check if directories exist
-  const publicExists = fs.existsSync(publicDir);
-  const videosExist = fs.existsSync(videosDir);
+  const jsFiles = fs.existsSync(staticJsDir) ? fs.readdirSync(staticJsDir) : [];
+  const cssFiles = fs.existsSync(staticCssDir) ? fs.readdirSync(staticCssDir) : [];
   
-  // Count video files
-  let videoCount = 0;
-  if (videosExist) {
-    const files = fs.readdirSync(videosDir);
-    videoCount = files.filter(file => file.endsWith('.mp4')).length;
+  let manifestData = null;
+  try {
+    if (fs.existsSync(assetManifestFile)) {
+      manifestData = JSON.parse(fs.readFileSync(assetManifestFile, 'utf8'));
+    }
+  } catch (error) {
+    logger.error(`Error reading asset manifest: ${error}`);
   }
   
-  // Check if index.html exists
-  const indexExists = fs.existsSync(path.join(publicDir, 'index.html'));
+  const result = {
+    timestamp: new Date().toISOString(),
+    environment: {
+      nodeEnv: ENV.NODE_ENV,
+      renderService: ENV.IS_RENDER,
+      port: ENV.PORT
+    },
+    directories: {
+      publicDir: {
+        path: publicDir,
+        exists: fs.existsSync(publicDir),
+        contents: fs.existsSync(publicDir) ? fs.readdirSync(publicDir) : []
+      },
+      staticDir: {
+        path: staticDir,
+        exists: fs.existsSync(staticDir),
+        contents: fs.existsSync(staticDir) ? fs.readdirSync(staticDir) : []
+      },
+      jsDir: {
+        path: staticJsDir,
+        exists: fs.existsSync(staticJsDir),
+        files: jsFiles,
+        count: jsFiles.length
+      },
+      cssDir: {
+        path: staticCssDir,
+        exists: fs.existsSync(staticCssDir),
+        files: cssFiles,
+        count: cssFiles.length
+      }
+    },
+    files: {
+      indexHtml: {
+        path: indexFile,
+        exists: fs.existsSync(indexFile),
+        size: fs.existsSync(indexFile) ? fs.statSync(indexFile).size : 0,
+        preview: fs.existsSync(indexFile) ? 
+          fs.readFileSync(indexFile, 'utf8').substring(0, 500) + '...' : null
+      },
+      assetManifest: {
+        path: assetManifestFile,
+        exists: fs.existsSync(assetManifestFile),
+        data: manifestData
+      }
+    },
+    testLinks: {
+      mainJs: jsFiles.find(f => f.startsWith('main.')),
+      mainCss: cssFiles.find(f => f.startsWith('main.')),
+      assetManifest: '/asset-manifest.json',
+      indexHtml: '/'
+    }
+  };
   
-  res.status(200).json({ 
-    status: 'ok',
-    environment: ENV.NODE_ENV,
-    publicDirectoryExists: publicExists,
-    videosDirectoryExists: videosExist,
-    indexHtmlExists: indexExists,
-    videoCount: videoCount,
-    videosDir: videosDir,
-    publicDir: publicDir,
-    corsOrigin: ENV.CORS_ORIGIN,
-    isRender: ENV.IS_RENDER
-  });
+  res.json(result);
 });
 
 // CORS debugger endpoint
