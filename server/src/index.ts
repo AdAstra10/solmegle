@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import { rateLimit } from 'express-rate-limit';
+import path from 'path';
 import connectDB from './config/database';
 import { connectRedis } from './config/redis';
 import ENV from './config/environment';
@@ -64,6 +65,23 @@ app.use('/api/users', userRoutes);
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
 });
+
+// Serve static assets in production
+if (ENV.NODE_ENV === 'production') {
+  // Set static folder
+  app.use(express.static(path.join(__dirname, '../../public')));
+  
+  // Serve videos directory
+  app.use('/videos', express.static(path.join(__dirname, '../../public/videos')));
+
+  // All other routes should redirect to index.html
+  app.get('*', (req, res) => {
+    res.sendFile(path.resolve(__dirname, '../../public', 'index.html'));
+  });
+} else {
+  // For development, specifically serve the videos folder
+  app.use('/videos', express.static(path.join(__dirname, '../../public/videos')));
+}
 
 // Error handling
 app.use(notFound);

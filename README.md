@@ -1,73 +1,92 @@
-# FlexRocket
+# Solmegle - Video Chat Application
 
-A sophisticated and scalable video chat platform similar to Omegle, enabling random pairing for video conversations in real-time.
+Solmegle is a video chat application inspired by Omegle that allows users to connect with random strangers for video conversations.
 
 ## Features
 
-- Real-time video chat using WebRTC
-- Text messaging alongside video
-- Random matching with other users
-- High scalability architecture (supporting up to 100K daily users)
-- Low-latency communication
+- Random video matching with strangers
+- Autoplay video functionality
+- Seamless transitions between video calls
 - Responsive design for desktop and mobile
-- User safety features and content moderation
 
-## Architecture
+## Tech Stack
 
-### Frontend
-- React.js with TypeScript
-- WebRTC for video streaming
-- Socket.io client for real-time communication
-- Styled Components for UI
+- **Frontend**: React, TypeScript, Styled Components
+- **Backend**: Node.js, Express, Socket.IO
+- **Database**: MongoDB (for user management)
+- **Cache**: Redis (for session management and chat queue)
 
-### Backend
-- Node.js with Express
-- Socket.io for WebSocket connections
-- Redis for session management and temporary data
-- MongoDB for persistent storage
-- Nginx for load balancing
-- Docker for containerization
+## Project Structure
 
-## Technical Implementation
-
-### Scaling Strategy
-- Microservices architecture
-- Horizontal scaling with container orchestration
-- WebRTC for direct peer-to-peer connections to reduce server load
-- Redis pub/sub for managing user matching across multiple server instances
-- Connection pooling and database sharding for high traffic
-
-### Security Considerations
-- STUN/TURN servers for NAT traversal
-- End-to-end encryption for video streams
-- Rate limiting and request throttling
-- Input sanitization
-- CORS and CSP implementation
+```
+solmegle/
+├── client/           # React frontend
+│   ├── public/       # Static assets
+│   │   └── videos/   # Video files for simulation
+│   └── src/          # Source code
+├── server/           # Node.js backend
+│   ├── src/          # Source code
+│   └── dist/         # Compiled TypeScript
+├── package.json      # Root package.json for deployment
+└── build.sh          # Build script for deployment
+```
 
 ## Development
 
 ### Prerequisites
-- Node.js (v16+)
-- Docker and Docker Compose
+
+- Node.js (v16 or higher)
 - MongoDB
 - Redis
 
-### Setup and Installation
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/flex-rocket.git
-cd flex-rocket
+### Setup
 
-# Install dependencies
-cd client && npm install
-cd ../server && npm install
+1. Clone the repository:
+   ```
+   git clone https://github.com/yourusername/solmegle.git
+   cd solmegle
+   ```
 
-# Start development environment
-docker-compose up -d
-```
+2. Install dependencies:
+   ```
+   npm install
+   ```
 
-## Deployment
-The application is designed to be deployed using Docker containers on a cloud platform like AWS, Google Cloud, or Azure with auto-scaling capabilities.
+3. Start the development server:
+   ```
+   npm run dev
+   ```
+
+## Deployment to Render.com
+
+### Step 1: Create a New Web Service
+
+1. Log in to your [Render Dashboard](https://dashboard.render.com/)
+2. Click "New +" and select "Web Service"
+3. Connect your GitHub repository
+
+### Step 2: Configure the Web Service
+
+- **Name**: Choose a name for your service
+- **Environment**: Node
+- **Build Command**: `./build.sh`
+- **Start Command**: `npm start`
+- **Plan**: Choose an appropriate plan (Free tier works for testing)
+
+### Step 3: Add Environment Variables
+
+Create the following environment variables in your Render dashboard:
+
+- `NODE_ENV`: `production`
+- `PORT`: `10000` (Render will use its own PORT variable)
+- `MONGODB_URI`: Your MongoDB connection string
+- `REDIS_URI`: Your Redis connection string (optional)
+- `JWT_SECRET`: A secure string for JWT authentication
+
+### Step 4: Deploy
+
+Click "Create Web Service" and Render will automatically build and deploy your application.
 
 ## License
-MIT
+
+This project is licensed under the ISC License.
