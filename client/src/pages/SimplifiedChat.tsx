@@ -29,63 +29,104 @@ const SolmegleChat: React.FC = () => {
     return newId;
   }, [currentVideoId]);
 
-  // Function to simulate partner connection
+  // Update connectToPartner to prioritize real user connections
   const connectToPartner = useCallback(() => {
     // Clear all messages for the new session
     setMessages([]);
     
-    // Show searching message with static video
+    // Show static video while searching
     setIsSearchingForPartner(true);
     setCurrentVideoId(null);
     
-    console.log("Searching for real users in the session...");
-    
-    // In a real implementation, this would be an API call to find real users
-    const findRealUsers = () => {
-      // This is a placeholder for the real user matching logic
-      // In production, this would check a server endpoint for available users
+    // Function to check for real users
+    const checkForRealUsers = () => {
+      // This would be a real API check in production
+      // For now, we simulate the check
+      const hasRealPartners = false; // Replace with actual API call
       
-      // Placeholder: Real implementation would check a database or matchmaking service
-      return new Promise<boolean>((resolve) => {
-        // Simulate network request to check for real users
-        console.log("Checking server for available users...");
-        setTimeout(() => {
-          // For demo purposes, always return false
-          // In production, this would return true if users are available
-          resolve(false);
-        }, 3000); // Check for 3 seconds
-      });
-    };
-    
-    // First attempt to find real users (priority)
-    findRealUsers()
-      .then(hasRealUsers => {
-        if (hasRealUsers) {
-          console.log("Real user found! Connecting...");
-          // Connect to real user logic would go here
-          setIsRealPartner(true);
-          setIsSearchingForPartner(false);
-          // Additional real user connection implementation
-        } else {
-          console.log("No real users available. Falling back to video...");
-          // Fall back to video after trying to find real users
-          const videoId = getRandomVideoId();
-          console.log(`Loading fallback video: ${videoId}.mp4`);
-          setCurrentVideoId(videoId);
-          setIsRealPartner(false);
-          setIsSearchingForPartner(false);
-        }
-      })
-      .catch(error => {
-        console.error("Error finding users:", error);
-        // Fall back to video if there's an error
+      if (hasRealPartners) {
+        // Real user connection logic would go here
+        setIsRealPartner(true);
+        setIsSearchingForPartner(false);
+        // More implementation for real connection
+      } else {
+        // If no real users found after 5 seconds, use fallback video
         const videoId = getRandomVideoId();
-        console.log(`Error occurred. Loading fallback video: ${videoId}.mp4`);
+        console.log(`No real partners found. Loading video: ${videoId}.mp4`);
         setCurrentVideoId(videoId);
         setIsRealPartner(false);
         setIsSearchingForPartner(false);
-      });
+      }
+    };
+
+    // Try to find real users multiple times before falling back to video
+    let attempts = 0;
+    const maxAttempts = 3;
+    const attemptInterval = 1500; // 1.5 seconds between attempts
+
+    const findUser = () => {
+      if (attempts < maxAttempts) {
+        console.log(`Searching for real users... Attempt ${attempts + 1}/${maxAttempts}`);
+        // This would be your actual user matching logic
+        const hasMatch = false; // Replace with real matching logic
+        
+        if (hasMatch) {
+          // Found a real user
+          setIsRealPartner(true);
+          setIsSearchingForPartner(false);
+          // Implement real connection logic here
+        } else {
+          attempts++;
+          setTimeout(findUser, attemptInterval);
+        }
+      } else {
+        // After all attempts, fall back to video
+        const videoId = getRandomVideoId();
+        console.log(`No real partners found after ${maxAttempts} attempts. Loading video: ${videoId}.mp4`);
+        setCurrentVideoId(videoId);
+        setIsRealPartner(false);
+        setIsSearchingForPartner(false);
+      }
+    };
+
+    // Start searching for real users
+    findUser();
   }, [getRandomVideoId, setMessages]);
+
+  // Add video ended event listener
+  useEffect(() => {
+    const strangerVideo = strangerVideoRef.current;
+    
+    const handleVideoEnded = () => {
+      // When one video ends, simulate searching for a new partner
+      if (!isRealPartner) {
+        // Clear all messages for the new session
+        setMessages([]);
+        
+        // Show "searching for partner" message for 5 seconds
+        setIsSearchingForPartner(true);
+        setCurrentVideoId(null);
+        
+        // After 5 seconds, show a new video
+        setTimeout(() => {
+          const nextVideoId = getRandomVideoId();
+          console.log(`Connecting to next video: ${nextVideoId}.mp4`);
+          setCurrentVideoId(nextVideoId);
+          setIsSearchingForPartner(false);
+        }, 5000);
+      }
+    };
+    
+    if (strangerVideo) {
+      strangerVideo.addEventListener('ended', handleVideoEnded);
+    }
+    
+    return () => {
+      if (strangerVideo) {
+        strangerVideo.removeEventListener('ended', handleVideoEnded);
+      }
+    };
+  }, [isRealPartner, getRandomVideoId]);
 
   // Request camera access as soon as the component mounts
   useEffect(() => {
@@ -153,71 +194,6 @@ const SolmegleChat: React.FC = () => {
     setMessages([...messages, { text: messageInput, isUser: true }]);
     setMessageInput('');
   };
-
-  // Add video ended event listener with priority for finding real users
-  useEffect(() => {
-    const strangerVideo = strangerVideoRef.current;
-    
-    const handleVideoEnded = () => {
-      // When one video ends, always try to find a real user first
-      // Clear all messages for the new session
-      setMessages([]);
-      
-      // Show static video while searching
-      setIsSearchingForPartner(true);
-      setCurrentVideoId(null);
-      
-      console.log("Video ended. Searching for real users...");
-      
-      // Similar logic to connectToPartner - prioritize finding real users
-      const findRealUsers = () => {
-        return new Promise<boolean>((resolve) => {
-          console.log("Checking server for available users...");
-          setTimeout(() => {
-            // For demo: always false. In production this would check real users
-            resolve(false);
-          }, 3000);
-        });
-      };
-      
-      // Priority: Try to find real users first
-      findRealUsers()
-        .then(hasRealUsers => {
-          if (hasRealUsers) {
-            console.log("Real user found! Connecting...");
-            setIsRealPartner(true);
-            setIsSearchingForPartner(false);
-            // Additional real user connection logic
-          } else {
-            console.log("No real users available. Falling back to video...");
-            // Fall back to video
-            const nextVideoId = getRandomVideoId();
-            console.log(`Loading next video: ${nextVideoId}.mp4`);
-            setCurrentVideoId(nextVideoId);
-            setIsRealPartner(false);
-            setIsSearchingForPartner(false);
-          }
-        })
-        .catch(error => {
-          console.error("Error finding users:", error);
-          // Fall back to video on error
-          const nextVideoId = getRandomVideoId();
-          setCurrentVideoId(nextVideoId);
-          setIsRealPartner(false);
-          setIsSearchingForPartner(false);
-        });
-    };
-    
-    if (strangerVideo) {
-      strangerVideo.addEventListener('ended', handleVideoEnded);
-    }
-    
-    return () => {
-      if (strangerVideo) {
-        strangerVideo.removeEventListener('ended', handleVideoEnded);
-      }
-    };
-  }, [isRealPartner, getRandomVideoId, setMessages, setIsSearchingForPartner, setCurrentVideoId, setIsRealPartner, strangerVideoRef]);
 
   return (
     <>

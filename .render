@@ -1,4 +1,0 @@
-build:
-  buildCommand: npm run install-client && npm run install-server && npm run build-client && npm run build-server
-start:
-  startCommand: chmod +x ./render-start.sh && ./render-start.sh 

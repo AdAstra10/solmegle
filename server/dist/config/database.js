@@ -16,8 +16,21 @@ const mongoose_1 = __importDefault(require("mongoose"));
 const environment_1 = __importDefault(require("./environment"));
 const logger_1 = __importDefault(require("../utils/logger"));
 const connectDB = () => __awaiter(void 0, void 0, void 0, function* () {
+    // Skip MongoDB connection if URI is not provided in production
+    if (!environment_1.default.MONGODB_URI && environment_1.default.NODE_ENV === 'production') {
+        logger_1.default.info('MongoDB URI not provided in production. Running without database.');
+        return;
+    }
     try {
-        const connection = yield mongoose_1.default.connect(environment_1.default.MONGODB_URI);
+        if (!environment_1.default.MONGODB_URI) {
+            throw new Error('MongoDB URI is required but not provided');
+        }
+        // Set connection options
+        const options = {
+            serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
+            family: 4 // Force IPv4 instead of trying IPv6 first
+        };
+        const connection = yield mongoose_1.default.connect(environment_1.default.MONGODB_URI, options);
         logger_1.default.info(`MongoDB Connected: ${connection.connection.host}`);
     }
     catch (error) {
@@ -27,7 +40,13 @@ const connectDB = () => __awaiter(void 0, void 0, void 0, function* () {
         else {
             logger_1.default.error('Unknown error connecting to MongoDB');
         }
-        process.exit(1);
+        // Only exit in non-production environments
+        if (environment_1.default.NODE_ENV !== 'production') {
+            process.exit(1);
+        }
+        else {
+            logger_1.default.warn('Continuing without MongoDB in production mode. Some features may not work.');
+        }
     }
 });
 exports.default = connectDB;
