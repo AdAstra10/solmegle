@@ -138,25 +138,64 @@ const SolmegleChat: React.FC = () => {
     return new Promise<void>((resolve, reject) => {
       console.log('Requesting camera/mic access');
       
-      // Simple constraints for better cross-browser compatibility
+      // CRITICAL FIX: More reliable constraints
       const constraints = {
-        video: true,
-        audio: true
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          facingMode: "user"
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true
+        }
       };
       
+      // CRITICAL FIX: First check if we already have active tracks
+      if (userStreamRef.current) {
+        const allTracksActive = userStreamRef.current.getTracks().every(track => 
+          track.readyState === 'live' && track.enabled);
+          
+        if (allTracksActive) {
+          console.log('Already have active tracks, reusing existing stream');
+          // Make sure the video element is updated
+          if (userVideoRef.current && !userVideoRef.current.srcObject) {
+            userVideoRef.current.srcObject = userStreamRef.current;
+            userVideoRef.current.muted = true;
+          }
+          setIsCameraAllowed(true);
+          resolve();
+          return;
+        } else {
+          console.log('Existing tracks not active, stopping them first');
+          userStreamRef.current.getTracks().forEach(track => {
+            track.stop();
+          });
+          userStreamRef.current = null;
+        }
+      }
+      
+      // Try to get a new stream
       navigator.mediaDevices.getUserMedia(constraints)
         .then(stream => {
           console.log(`Camera access granted! Got stream with ${stream.getTracks().length} tracks`);
           
-          // Stop any existing stream first
-          if (userStreamRef.current) {
-            userStreamRef.current.getTracks().forEach(track => {
-              track.stop();
-            });
+          // Set the new stream
+          userStreamRef.current = stream;
+          
+          // CRITICAL FIX: Force create new track references to avoid readyState issues
+          const videoTrack = stream.getVideoTracks()[0];
+          const audioTrack = stream.getAudioTracks()[0];
+          
+          if (videoTrack) {
+            console.log(`Video track: ${videoTrack.label}, state: ${videoTrack.readyState}`);
+            videoTrack.enabled = true;
           }
           
-          // Store the new stream
-          userStreamRef.current = stream;
+          if (audioTrack) {
+            console.log(`Audio track: ${audioTrack.label}, state: ${audioTrack.readyState}`);
+            audioTrack.enabled = true;
+          }
           
           // Display our own video
           if (userVideoRef.current) {
@@ -164,9 +203,10 @@ const SolmegleChat: React.FC = () => {
             userVideoRef.current.muted = true; // Mute our own video to prevent feedback
             
             userVideoRef.current.onloadedmetadata = () => {
+              console.log('Local video metadata loaded, playing...');
               userVideoRef.current!.play()
                 .then(() => {
-                  console.log('Local video playing');
+                  console.log('Local video playing successfully');
                   setIsCameraAllowed(true);
                   resolve();
                 })
@@ -285,6 +325,38 @@ const SolmegleChat: React.FC = () => {
   const createPeerConnection = useCallback((targetUserId: string, isInitiator: boolean) => {
     console.log(`Creating peer connection to ${targetUserId} as ${isInitiator ? 'initiator' : 'responder'}`);
     
+    // CRITICAL FIX: Ensure we have camera access before creating the connection
+    const ensureMediaTracks = () => {
+      return new Promise<MediaStream>((resolve, reject) => {
+        if (userStreamRef.current) {
+          const allTracksActive = userStreamRef.current.getTracks().every(track => 
+            track.readyState === 'live' && track.enabled);
+            
+          if (allTracksActive) {
+            console.log('Using existing active media tracks');
+            resolve(userStreamRef.current);
+            return;
+          } else {
+            console.log('Existing tracks not active, stopping them');
+            userStreamRef.current.getTracks().forEach(track => track.stop());
+            userStreamRef.current = null;
+          }
+        }
+        
+        // Need to get new tracks
+        console.log('Getting new media tracks');
+        requestCameraAccess()
+          .then(() => {
+            if (!userStreamRef.current) {
+              reject(new Error('Failed to get camera tracks after access granted'));
+              return;
+            }
+            resolve(userStreamRef.current);
+          })
+          .catch(reject);
+      });
+    };
+    
     // CRITICAL FIX: Check if we're already connecting to avoid duplicate connections
     if (peerConnectionRef.current) {
       console.log("We already have an active peer connection. Checking if it's the same partner...");
@@ -302,260 +374,223 @@ const SolmegleChat: React.FC = () => {
     setIsActiveConnection(true);
     setIsConnecting(true);
     
-    // Create new peer connection with simplified config
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        {
-          urls: 'turn:openrelay.metered.ca:80',
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        },
-        {
-          urls: 'turn:global.turn.twilio.com:3478?transport=udp',
-          username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334a2cebc8b250621',
-          credential: 'w1WpauIZ6mkQ6K+G0vgvzBnMoFtF7t0FMnqQ+q+1Cjk='
-        }
-      ],
-      iceCandidatePoolSize: 10
-    });
-    
-    peerConnectionRef.current = pc;
-    
-    // Add connection state monitoring with more frequent checks
-    const connectionMonitor = setInterval(() => {
-      if (!peerConnectionRef.current) {
-        console.log("Connection monitor: No peer connection, clearing interval");
-        clearInterval(connectionMonitor);
-        return;
-      }
+    // First ensure we have media tracks, then create the connection
+    return ensureMediaTracks().then(mediaStream => {
+      // Create new peer connection with simplified config
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          {
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:global.turn.twilio.com:3478?transport=udp',
+            username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334a2cebc8b250621',
+            credential: 'w1WpauIZ6mkQ6K+G0vgvzBnMoFtF7t0FMnqQ+q+1Cjk='
+          }
+        ],
+        iceCandidatePoolSize: 10
+      });
       
-      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-        console.log(`Connection monitor: WebRTC state is ${pc.connectionState}, attempting recovery`);
+      peerConnectionRef.current = pc;
+      
+      // Add connection state monitoring
+      const connectionMonitor = setInterval(() => {
+        if (!peerConnectionRef.current) {
+          console.log("Connection monitor: No peer connection, clearing interval");
+          clearInterval(connectionMonitor);
+          return;
+        }
         
-        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-          console.log('ICE connection failed, trying to restart ICE');
-          try {
-            // Try to restart ICE
-            pc.restartIce();
-            console.log('ICE restart initiated');
-          } catch (err) {
-            console.error('Error restarting ICE:', err);
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          console.log(`Connection monitor: WebRTC state is ${pc.connectionState}, attempting recovery`);
+          
+          if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+            console.log('ICE connection failed, trying to restart ICE');
+            try {
+              pc.restartIce();
+              console.log('ICE restart initiated');
+            } catch (err) {
+              console.error('Error restarting ICE:', err);
+            }
           }
         }
-      }
-    }, 2000); // Check more frequently
-    
-    // Store the interval reference for cleanup
-    connectionMonitorRef.current = connectionMonitor;
-    
-    // Add simple connection state logging with better error handling
-    pc.onconnectionstatechange = () => {
-      console.log(`Connection state changed to: ${pc.connectionState}`);
-      setConnectionStatus(`Connection: ${pc.connectionState}`);
+      }, 2000); // Check more frequently
       
-      if (pc.connectionState === 'connected') {
-        console.log('WebRTC connection established successfully!');
-        setIsRealPartner(true);
-        setIsActiveConnection(true);
-        setIsConnecting(false);
-        setIsSearchingForPartner(false); // Stop searching once connected
-      } else if (pc.connectionState === 'failed') {
-        console.warn('WebRTC connection failed');
-        setConnectionStatus("Connection failed. Click 'New Chat' to try again.");
-        setIsConnecting(false);
+      // Store the interval reference for cleanup
+      connectionMonitorRef.current = connectionMonitor;
+      
+      // Add connection state handling
+      pc.onconnectionstatechange = () => {
+        console.log(`Connection state changed to: ${pc.connectionState}`);
+        setConnectionStatus(`Connection: ${pc.connectionState}`);
         
-        // Don't automatically reconnect - let the user initiate a new chat
-        // This prevents the camera glitching due to rapid reconnection attempts
-      }
-    };
-    
-    // Add ICE connection state monitoring for more detailed diagnostics
-    pc.oniceconnectionstatechange = () => {
-      console.log(`ICE connection state changed to: ${pc.iceConnectionState}`);
+        if (pc.connectionState === 'connected') {
+          console.log('WebRTC connection established successfully!');
+          setIsRealPartner(true);
+          setIsActiveConnection(true);
+          setIsConnecting(false);
+          setIsSearchingForPartner(false); // Stop searching once connected
+        } else if (pc.connectionState === 'failed') {
+          console.warn('WebRTC connection failed');
+          setConnectionStatus("Connection failed. Click 'New Chat' to try again.");
+          setIsConnecting(false);
+        }
+      };
       
-      if (pc.iceConnectionState === 'disconnected') {
-        console.log('ICE disconnected - this may be temporary');
-        setConnectionStatus('Connection unstable - trying to recover...');
-      } else if (pc.iceConnectionState === 'failed') {
-        console.log('ICE connection failed');
-        setConnectionStatus('Connection failed - please start a new chat');
+      // Add ICE connection state monitoring
+      pc.oniceconnectionstatechange = () => {
+        console.log(`ICE connection state changed to: ${pc.iceConnectionState}`);
         
-        // CRITICAL FIX: Don't automatically restart - let user choose to reconnect
-        // This prevents camera glitching from constant reconnection attempts
-      } else if (pc.iceConnectionState === 'connected') {
-        console.log('ICE connected successfully');
-        setConnectionStatus('Connected');
-      }
-    };
-    
-    // Make sure we add local stream tracks to the connection
-    if (userStreamRef.current) {
-      const stream = userStreamRef.current;
-      console.log(`Adding ${stream.getTracks().length} local tracks to peer connection`);
+        if (pc.iceConnectionState === 'disconnected') {
+          console.log('ICE disconnected - this may be temporary');
+          setConnectionStatus('Connection unstable - trying to recover...');
+        } else if (pc.iceConnectionState === 'failed') {
+          console.log('ICE connection failed');
+          setConnectionStatus('Connection failed - please start a new chat');
+        } else if (pc.iceConnectionState === 'connected') {
+          console.log('ICE connected successfully');
+          setConnectionStatus('Connected');
+        }
+      };
       
-      // CRITICAL FIX: Ensure all tracks are enabled and ready before adding
-      let allTracksReady = true;
-      stream.getTracks().forEach(track => {
+      // CRITICAL FIX: Add tracks to connection more reliably
+      console.log(`Adding ${mediaStream.getTracks().length} tracks to peer connection`);
+      mediaStream.getTracks().forEach(track => {
+        // Verify track state
         if (track.readyState !== 'live') {
-          console.warn(`Track ${track.kind} is not ready (state: ${track.readyState})`);
-          allTracksReady = false;
+          console.warn(`Track ${track.kind} is not live (state: ${track.readyState}), might cause issues`);
+        }
+        
+        // Add track with error handling
+        try {
+          pc.addTrack(track, mediaStream);
+          console.log(`Added ${track.kind} track to peer connection`);
+        } catch (err) {
+          console.error(`Error adding track to peer connection:`, err);
+          // Try to recover by creating a clone of the track
+          try {
+            if (track.kind === 'video' && mediaStream.getVideoTracks().length > 0) {
+              const clonedTrack = mediaStream.getVideoTracks()[0].clone();
+              pc.addTrack(clonedTrack, mediaStream);
+              console.log(`Added cloned video track as fallback`);
+            } else if (track.kind === 'audio' && mediaStream.getAudioTracks().length > 0) {
+              const clonedTrack = mediaStream.getAudioTracks()[0].clone();
+              pc.addTrack(clonedTrack, mediaStream);
+              console.log(`Added cloned audio track as fallback`);
+            }
+          } catch (cloneErr) {
+            console.error(`Failed to add cloned track:`, cloneErr);
+          }
         }
       });
       
-      if (!allTracksReady) {
-        console.log("Not all tracks are ready, will delay adding tracks");
-        // If tracks aren't ready, wait a moment before adding
-        setTimeout(() => {
-          if (peerConnectionRef.current === pc) {
-            stream.getTracks().forEach(track => {
-              console.log(`Adding delayed ${track.kind} track to peer connection`);
-              track.enabled = true;
-              try {
-                pc.addTrack(track, stream);
-              } catch (err) {
-                console.error(`Error adding track to peer connection:`, err);
-              }
-            });
-          }
-        }, 500);
-      } else {
-        // Tracks are ready, add them immediately
-        stream.getTracks().forEach(track => {
-          // Ensure tracks are enabled
-          track.enabled = true;
-          try {
-            pc.addTrack(track, stream);
-            console.log(`Added ${track.kind} track to peer connection`);
-          } catch (err) {
-            console.error(`Error adding track to peer connection:`, err);
-          }
-        });
-      }
-    } else {
-      console.error("No local stream available when creating peer connection!");
-      // CRITICAL FIX: Get camera access now if we don't have it
-      requestCameraAccess()
-        .then(() => {
-          console.log("Camera access granted after delayed attempt");
-          if (peerConnectionRef.current === pc && userStreamRef.current) {
-            // Now add tracks
-            userStreamRef.current.getTracks().forEach(track => {
-              track.enabled = true;
-              try {
-                pc.addTrack(track, userStreamRef.current!);
-                console.log(`Added delayed ${track.kind} track after camera access`);
-              } catch (err) {
-                console.error(`Error adding delayed track:`, err);
-              }
-            });
-          }
-        })
-        .catch(err => {
-          console.error("Failed to get camera access during connection:", err);
-        });
-    }
-    
-    // Handle ICE candidates with better error handling
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        console.log(`Generated ICE candidate`);
-        if (socketRef.current && socketRef.current.connected) {
-          try {
-            socketRef.current.emit('webrtc_ice_candidate', {
-              candidate: event.candidate,
-              to: targetUserId,
-              from: userId || socketRef.current.id
-            });
-          } catch (err) {
-            console.error("Error sending ICE candidate:", err);
-          }
-        }
-      } else {
-        console.log('All ICE candidates have been generated');
-      }
-    };
-    
-    // Simplified remote track handling with better error handling
-    pc.ontrack = (event) => {
-      console.log(`Received remote ${event.track.kind} track`);
-      
-      if (event.streams && event.streams[0]) {
-        const remoteStream = event.streams[0];
-        console.log(`Got remote stream with ${remoteStream.getTracks().length} tracks`);
-        
-        if (strangerVideoRef.current) {
-          try {
-            // CRITICAL FIX: More reliable remote video handling
-            strangerVideoRef.current.srcObject = remoteStream;
-            strangerVideoRef.current.muted = false;
-            
-            strangerVideoRef.current.onloadedmetadata = () => {
-              console.log('Remote video metadata loaded, playing...');
-              if (strangerVideoRef.current) {
-                strangerVideoRef.current.play()
-                  .then(() => console.log('Remote video playing'))
-                  .catch(err => {
-                    console.error('Error playing remote video:', err);
-                    // Try with muted if autoplay is blocked
-                    if (err.name === 'NotAllowedError' && strangerVideoRef.current) {
-                      strangerVideoRef.current.muted = true;
-                      return strangerVideoRef.current.play();
-                    }
-                  });
-              }
-            };
-            
-            // CRITICAL FIX: Add error handling for video playback issues
-            strangerVideoRef.current.onerror = (err) => {
-              console.error("Error with remote video element:", err);
-            };
-          } catch (err) {
-            console.error("Error setting remote stream:", err);
+      // Handle ICE candidates 
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          console.log(`Generated ICE candidate`);
+          if (socketRef.current && socketRef.current.connected) {
+            try {
+              socketRef.current.emit('webrtc_ice_candidate', {
+                candidate: event.candidate,
+                to: targetUserId,
+                from: userId || socketRef.current.id
+              });
+            } catch (err) {
+              console.error("Error sending ICE candidate:", err);
+            }
           }
         } else {
-          console.warn('Stranger video element not available');
+          console.log('All ICE candidates have been generated');
+        }
+      };
+      
+      // Handle remote tracks
+      pc.ontrack = (event) => {
+        console.log(`Received remote ${event.track.kind} track`);
+        
+        if (event.streams && event.streams[0]) {
+          const remoteStream = event.streams[0];
+          console.log(`Got remote stream with ${remoteStream.getTracks().length} tracks`);
+          
+          if (strangerVideoRef.current) {
+            try {
+              strangerVideoRef.current.srcObject = remoteStream;
+              strangerVideoRef.current.muted = false;
+              
+              strangerVideoRef.current.onloadedmetadata = () => {
+                console.log('Remote video metadata loaded, playing...');
+                if (strangerVideoRef.current) {
+                  strangerVideoRef.current.play()
+                    .then(() => console.log('Remote video playing'))
+                    .catch(err => {
+                      console.error('Error playing remote video:', err);
+                      // Try with muted if autoplay is blocked
+                      if (err.name === 'NotAllowedError' && strangerVideoRef.current) {
+                        strangerVideoRef.current.muted = true;
+                        return strangerVideoRef.current.play();
+                      }
+                    });
+                }
+              };
+              
+              strangerVideoRef.current.onerror = (err) => {
+                console.error("Error with remote video element:", err);
+              };
+            } catch (err) {
+              console.error("Error setting remote stream:", err);
+            }
+          } else {
+            console.warn('Stranger video element not available');
+          }
+        }
+      };
+      
+      // Create and send offer if we're the initiator
+      if (isInitiator) {
+        try {
+          pc.createOffer()
+            .then(offer => {
+              console.log('Created offer, setting local description');
+              return pc.setLocalDescription(offer);
+            })
+            .then(() => {
+              // Wait a moment for ICE gathering before sending
+              setTimeout(() => {
+                if (pc.localDescription && socketRef.current && socketRef.current.connected) {
+                  console.log('Sending WebRTC offer');
+                  try {
+                    socketRef.current.emit('webrtc_offer', {
+                      offer: pc.localDescription,
+                      to: targetUserId,
+                      from: userId || socketRef.current.id
+                    });
+                  } catch (err) {
+                    console.error("Error sending WebRTC offer:", err);
+                  }
+                }
+              }, 1000);
+            })
+            .catch(err => {
+              console.error('Error creating/sending offer:', err);
+              setConnectionStatus("Error creating connection. Try 'New Chat'");
+            });
+        } catch (err) {
+          console.error("Exception during offer creation:", err);
+          setConnectionStatus("Error creating connection. Try 'New Chat'");
         }
       }
-    };
-    
-    // Create and send offer if we're the initiator with better error handling
-    if (isInitiator) {
-      try {
-        pc.createOffer()
-          .then(offer => {
-            console.log('Created offer, setting local description');
-            return pc.setLocalDescription(offer);
-          })
-          .then(() => {
-            // Wait a moment for ICE gathering before sending
-            setTimeout(() => {
-              if (pc.localDescription && socketRef.current && socketRef.current.connected) {
-                console.log('Sending WebRTC offer');
-                try {
-                  socketRef.current.emit('webrtc_offer', {
-                    offer: pc.localDescription,
-                    to: targetUserId,
-                    from: userId || socketRef.current.id
-                  });
-                } catch (err) {
-                  console.error("Error sending WebRTC offer:", err);
-                }
-              }
-            }, 1000);
-          })
-          .catch(err => {
-            console.error('Error creating/sending offer:', err);
-            setConnectionStatus("Error creating connection. Try 'New Chat'");
-          });
-      } catch (err) {
-        console.error("Exception during offer creation:", err);
-        setConnectionStatus("Error creating connection. Try 'New Chat'");
-      }
-    }
-    
-    return pc;
+      
+      return pc;
+    }).catch(err => {
+      console.error("Failed to ensure media tracks:", err);
+      setConnectionStatus("Camera error. Please refresh and try again.");
+      setIsConnecting(false);
+      return null;
+    });
   }, [userId, cleanupPeerConnection, findPartner, partnerId, requestCameraAccess]);
 
   // Handle partner disconnection more robustly
