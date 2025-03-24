@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import { rateLimit } from 'express-rate-limit';
+import path from 'path';
 import connectDB from './config/database';
 import { connectRedis } from './config/redis';
 import ENV from './config/environment';
@@ -43,7 +44,8 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' }
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: false
 }));
 app.use(morgan('dev'));
 
@@ -57,12 +59,21 @@ const limiter = rateLimit({
 });
 app.use('/api', limiter);
 
+// Serve static files from the client build directory
+const clientBuildPath = path.resolve(__dirname, '../../client/build');
+app.use(express.static(clientBuildPath));
+
 // Routes
 app.use('/api/users', userRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
+});
+
+// Catch-all route for SPA
+app.get('*', (req, res) => {
+  res.sendFile(path.join(clientBuildPath, 'index.html'));
 });
 
 // Error handling

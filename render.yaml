@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: solmegle
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: |
+      # Install dependencies for both server and client
+      cd client && npm install && npm run build
+      cd ../server && npm install --no-optional && npm run build
+    startCommand: cd server && node dist/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 8080
+    healthCheckPath: / 

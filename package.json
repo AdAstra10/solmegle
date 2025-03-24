@@ -1,0 +1,14 @@
+{
+  "name": "solmegle",
+  "version": "1.0.0",
+  "description": "Solmegle - Video chatting application",
+  "scripts": {
+    "build": "cd client && npm install && npm run build && cd ../server && npm install --no-optional && npm run build",
+    "start": "cd server && node dist/index.js"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "author": "",
+  "license": "ISC"
+} 
