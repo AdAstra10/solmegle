@@ -191,6 +191,324 @@ const SolmegleChat: React.FC = () => {
     });
   }, []);
 
+  // Helper function to find partner
+  const findPartner = useCallback((socket: Socket) => {
+    console.log("Sending find_partner request with userId:", userId);
+    setIsConnecting(true);
+    setIsSearchingForPartner(true);
+    socket.emit("find_partner", userId);
+  }, [userId]);
+
+  // Enhanced connectToPartner function with ONLY real user connections
+  const connectToPartner = useCallback(() => {
+    if (!socketRef.current || !userId) {
+      console.log("Cannot connect: Socket not initialized or missing userId");
+      return;
+    }
+
+    // Show searching status
+    setIsSearchingForPartner(true);
+    setMessages([]);
+    setConnectionStatus("Searching for a real partner...");
+    setIsConnecting(true);
+    
+    findPartner(socketRef.current);
+    
+    // Set up interval to regularly check for partners
+    const intervalId = setInterval(() => {
+      if (socketRef.current && isSearchingForPartner && !isActiveConnection && !isConnecting) {
+        console.log("Still searching for partner...");
+        findPartner(socketRef.current);
+      } else if (isActiveConnection || !isSearchingForPartner) {
+        clearInterval(intervalId);
+      }
+    }, 5000);
+
+    return () => clearInterval(intervalId);
+  }, [socketRef, userId, isSearchingForPartner, isActiveConnection, isConnecting, findPartner]);
+
+  // Function to create and return a new RTCPeerConnection
+  const createPeerConnection = useCallback((targetUserId: string, isInitiator: boolean) => {
+    console.log(`Creating peer connection to ${targetUserId} as ${isInitiator ? 'initiator' : 'responder'}`);
+    
+    // Cleanup any existing connections
+    cleanupPeerConnection();
+    
+    // Create new peer connection with simplified config
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:global.turn.twilio.com:3478?transport=udp',
+          username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334a2cebc8b250621',
+          credential: 'w1WpauIZ6mkQ6K+G0vgvzBnMoFtF7t0FMnqQ+q+1Cjk='
+        }
+      ],
+      iceCandidatePoolSize: 10
+    });
+    
+    peerConnectionRef.current = pc;
+    
+    // Add simple connection state logging
+    pc.onconnectionstatechange = () => {
+      console.log(`Connection state changed to: ${pc.connectionState}`);
+      setConnectionStatus(`Connection: ${pc.connectionState}`);
+      
+      if (pc.connectionState === 'connected') {
+        console.log('WebRTC connection established successfully!');
+        setIsRealPartner(true);
+        setIsActiveConnection(true);
+      } else if (pc.connectionState === 'failed') {
+        console.warn('WebRTC connection failed, attempting reconnect');
+        // Try to restart the connection after a short delay
+        setTimeout(() => {
+          if (socketRef.current) {
+            findPartner(socketRef.current);
+          }
+        }, 2000);
+      }
+    };
+    
+    // Make sure we add local stream tracks to the connection
+    if (userStreamRef.current) {
+      const stream = userStreamRef.current;
+      console.log(`Adding ${stream.getTracks().length} local tracks to peer connection`);
+      
+      stream.getTracks().forEach(track => {
+        // Ensure tracks are enabled
+        track.enabled = true;
+        try {
+          pc.addTrack(track, stream);
+          console.log(`Added ${track.kind} track to peer connection`);
+        } catch (err) {
+          console.error(`Error adding track to peer connection:`, err);
+        }
+      });
+    } else {
+      console.error("No local stream available when creating peer connection!");
+    }
+    
+    // Handle ICE candidates simply
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        console.log(`Generated ICE candidate`);
+        if (socketRef.current && socketRef.current.connected) {
+          socketRef.current.emit('webrtc_ice_candidate', {
+            candidate: event.candidate,
+            to: targetUserId,
+            from: userId || socketRef.current.id
+          });
+        }
+      } else {
+        console.log('All ICE candidates have been generated');
+      }
+    };
+    
+    // Simplified remote track handling
+    pc.ontrack = (event) => {
+      console.log(`Received remote ${event.track.kind} track`);
+      
+      if (event.streams && event.streams[0]) {
+        const remoteStream = event.streams[0];
+        console.log(`Got remote stream with ${remoteStream.getTracks().length} tracks`);
+        
+        if (strangerVideoRef.current) {
+          strangerVideoRef.current.srcObject = remoteStream;
+          strangerVideoRef.current.muted = false;
+          
+          strangerVideoRef.current.onloadedmetadata = () => {
+            console.log('Remote video metadata loaded, playing...');
+            strangerVideoRef.current!.play()
+              .then(() => console.log('Remote video playing'))
+              .catch(err => {
+                console.error('Error playing remote video:', err);
+                // Try with muted if autoplay is blocked
+                if (err.name === 'NotAllowedError') {
+                  strangerVideoRef.current!.muted = true;
+                  return strangerVideoRef.current!.play();
+                }
+              });
+          };
+        } else {
+          console.warn('Stranger video element not available');
+        }
+      }
+    };
+    
+    // Create and send offer if we're the initiator
+    if (isInitiator) {
+      pc.createOffer()
+        .then(offer => {
+          console.log('Created offer, setting local description');
+          return pc.setLocalDescription(offer);
+        })
+        .then(() => {
+          // Wait a moment for ICE gathering before sending
+          setTimeout(() => {
+            if (pc.localDescription && socketRef.current) {
+              console.log('Sending WebRTC offer');
+              socketRef.current.emit('webrtc_offer', {
+                offer: pc.localDescription,
+                to: targetUserId,
+                from: userId || socketRef.current.id
+              });
+            }
+          }, 1000);
+        })
+        .catch(err => console.error('Error creating/sending offer:', err));
+    }
+    
+    return pc;
+  }, [userId, cleanupPeerConnection, findPartner]);
+
+  // Handle partner disconnection more robustly
+  const handlePartnerDisconnect = () => {
+    console.log("Handling partner disconnect");
+    
+    setIsRealPartner(false);
+    setIsActiveConnection(false);
+    setPartnerId(null);
+    
+    // Clean up peer connection
+    if (peerConnectionRef.current) {
+      // Close all tracks first
+      peerConnectionRef.current.getSenders().forEach(sender => {
+        if (sender.track) {
+          sender.track.stop();
+        }
+      });
+      // Close the connection
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+    
+    // Reset video element
+    if (strangerVideoRef.current) {
+      strangerVideoRef.current.srcObject = null;
+    }
+  };
+
+  // Start new chat with another partner
+  const startNewChat = () => {
+    console.log("Starting new chat");
+    
+    // Clear messages and reset state
+    setMessages([]);
+    
+    // Clean up existing connection
+    handlePartnerDisconnect();
+    
+    // Set as not searching initially (will set to true in connectToPartner)
+    setIsSearchingForPartner(false);
+    setConnectionStatus("Click 'New Chat' to find a partner");
+    
+    // Connect to new partner
+    connectToPartner();
+  };
+
+  // Stop searching for partners
+  const stopSearching = () => {
+    console.log("Stopping search");
+    setIsSearchingForPartner(false);
+    setIsConnecting(false);
+    setConnectionStatus("Search stopped. Click 'New Chat' to find a partner");
+    
+    // Clear any timeouts
+    if (partnerConnectionTimeout.current) {
+      clearTimeout(partnerConnectionTimeout.current);
+      partnerConnectionTimeout.current = null;
+    }
+  };
+
+  // Function to send a message to the partner
+  const sendMessage = useCallback(() => {
+    if (inputMessage.trim() === '') return;
+    
+    // Add message to local state immediately
+    setMessages(prev => [...prev, { text: inputMessage, isUser: true }]);
+    const messageToSend = inputMessage;
+    setInputMessage(''); // Clear input field immediately
+    
+    // If connected to a real partner, send via socket
+    if (isRealPartner && socketRef.current && socketRef.current.connected) {
+      // Check if we have a partner ID
+      if (partnerId) {
+        console.log('Sending message to partner via WebSocket:', partnerId);
+        socketRef.current.emit('send_message', { 
+          to: partnerId, // Use the actual partner ID
+          message: messageToSend
+        });
+      } else {
+        console.warn('Cannot send message: no partner ID available');
+      }
+    } else {
+      console.log('Not sending message: no real partner or socket disconnected');
+    }
+  }, [inputMessage, isRealPartner, partnerId]);
+
+  // Handle message input with Enter key
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      sendMessage();
+    }
+  }, [sendMessage]);
+
+  // FIX VIDEO RENDERING: 
+  const renderVideoDisplay = () => {
+    if (isSearchingForPartner) {
+      return (
+        <VideoContainer>
+          <StrangerVideo 
+            autoPlay
+            playsInline
+            muted
+            loop
+            src="/static/static.mp4"
+            disablePictureInPicture
+            controlsList="nodownload nofullscreen noremoteplayback"
+          />
+          <SolmegleWatermark>Solmegle</SolmegleWatermark>
+          <ConnectionStatus>{connectionStatus}</ConnectionStatus>
+        </VideoContainer>
+      );
+    } else if (isRealPartner) {
+      return (
+        <VideoContainer>
+          <StrangerVideo 
+            ref={strangerVideoRef} 
+            autoPlay
+            playsInline
+            disablePictureInPicture
+            controlsList="nodownload nofullscreen noremoteplayback"
+          />
+          <LiveIndicator>LIVE</LiveIndicator>
+        </VideoContainer>
+      );
+    } else {
+      return (
+        <VideoContainer>
+          <StrangerVideo 
+            autoPlay
+            playsInline
+            muted
+            loop
+            src="/static/static.mp4"
+            disablePictureInPicture
+            controlsList="nodownload nofullscreen noremoteplayback"
+          />
+          <SolmegleWatermark>Solmegle</SolmegleWatermark>
+          <ConnectionStatus>Click "New Chat" to start</ConnectionStatus>
+        </VideoContainer>
+      );
+    }
+  };
+
   // Initialize the socket connection outside of the WebRTC flow to avoid circular dependencies
   useEffect(() => {
     if (!socketRef.current) {
@@ -369,7 +687,7 @@ const SolmegleChat: React.FC = () => {
         newSocket.disconnect();
       };
     }
-  }, [userId, isRealPartner, isSearchingForPartner, isActiveConnection, isConnecting, cleanupPeerConnection, requestCameraAccess, createPeerConnection]);
+  }, [userId, isRealPartner, isSearchingForPartner, isActiveConnection, isConnecting, cleanupPeerConnection, requestCameraAccess]);
 
   // Start WebRTC connection when we get a match
   useEffect(() => {
@@ -377,275 +695,7 @@ const SolmegleChat: React.FC = () => {
       console.log("Starting WebRTC with matched partner", partnerId);
       createPeerConnection(partnerId, true);
     }
-  }, [partnerId, isRealPartner]);
-
-  // Function to create and return a new RTCPeerConnection
-  const createPeerConnection = useCallback((targetUserId: string, isInitiator: boolean) => {
-    console.log(`Creating peer connection to ${targetUserId} as ${isInitiator ? 'initiator' : 'responder'}`);
-    
-    // Cleanup any existing connections
-    cleanupPeerConnection();
-    
-    // Create new peer connection with simplified config
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        {
-          urls: 'turn:openrelay.metered.ca:80',
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        },
-        {
-          urls: 'turn:global.turn.twilio.com:3478?transport=udp',
-          username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334a2cebc8b250621',
-          credential: 'w1WpauIZ6mkQ6K+G0vgvzBnMoFtF7t0FMnqQ+q+1Cjk='
-        }
-      ],
-      iceCandidatePoolSize: 10
-    });
-    
-    peerConnectionRef.current = pc;
-    
-    // Add simple connection state logging
-    pc.onconnectionstatechange = () => {
-      console.log(`Connection state changed to: ${pc.connectionState}`);
-      setConnectionStatus(`Connection: ${pc.connectionState}`);
-      
-      if (pc.connectionState === 'connected') {
-        console.log('WebRTC connection established successfully!');
-        setIsRealPartner(true);
-        setIsActiveConnection(true);
-      } else if (pc.connectionState === 'failed') {
-        console.warn('WebRTC connection failed, attempting reconnect');
-        // Try to restart the connection after a short delay
-        setTimeout(() => {
-          if (socketRef.current) {
-            findPartner(socketRef.current);
-          }
-        }, 2000);
-      }
-    };
-    
-    // Make sure we add local stream tracks to the connection
-    if (userStreamRef.current) {
-      const stream = userStreamRef.current;
-      console.log(`Adding ${stream.getTracks().length} local tracks to peer connection`);
-      
-      stream.getTracks().forEach(track => {
-        // Ensure tracks are enabled
-        track.enabled = true;
-        try {
-          pc.addTrack(track, stream);
-          console.log(`Added ${track.kind} track to peer connection`);
-        } catch (err) {
-          console.error(`Error adding track to peer connection:`, err);
-        }
-      });
-    } else {
-      console.error("No local stream available when creating peer connection!");
-    }
-    
-    // Handle ICE candidates simply
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        console.log(`Generated ICE candidate`);
-        if (socketRef.current && socketRef.current.connected) {
-          socketRef.current.emit('webrtc_ice_candidate', {
-            candidate: event.candidate,
-            to: targetUserId,
-            from: userId || socketRef.current.id
-          });
-        }
-      } else {
-        console.log('All ICE candidates have been generated');
-      }
-    };
-    
-    // Simplified remote track handling
-    pc.ontrack = (event) => {
-      console.log(`Received remote ${event.track.kind} track`);
-      
-      if (event.streams && event.streams[0]) {
-        const remoteStream = event.streams[0];
-        console.log(`Got remote stream with ${remoteStream.getTracks().length} tracks`);
-        
-        if (strangerVideoRef.current) {
-          strangerVideoRef.current.srcObject = remoteStream;
-          strangerVideoRef.current.muted = false;
-          
-          strangerVideoRef.current.onloadedmetadata = () => {
-            console.log('Remote video metadata loaded, playing...');
-            strangerVideoRef.current!.play()
-              .then(() => console.log('Remote video playing'))
-              .catch(err => {
-                console.error('Error playing remote video:', err);
-                // Try with muted if autoplay is blocked
-                if (err.name === 'NotAllowedError') {
-                  strangerVideoRef.current!.muted = true;
-                  return strangerVideoRef.current!.play();
-                }
-              });
-          };
-        } else {
-          console.warn('Stranger video element not available');
-        }
-      }
-    };
-    
-    // Create and send offer if we're the initiator
-    if (isInitiator) {
-      pc.createOffer()
-        .then(offer => {
-          console.log('Created offer, setting local description');
-          return pc.setLocalDescription(offer);
-        })
-        .then(() => {
-          // Wait a moment for ICE gathering before sending
-          setTimeout(() => {
-            if (pc.localDescription && socketRef.current) {
-              console.log('Sending WebRTC offer');
-              socketRef.current.emit('webrtc_offer', {
-                offer: pc.localDescription,
-                to: targetUserId,
-                from: userId || socketRef.current.id
-              });
-            }
-          }, 1000);
-        })
-        .catch(err => console.error('Error creating/sending offer:', err));
-    }
-    
-    return pc;
-  }, [userId, cleanupPeerConnection]);
-
-  // Enhanced connectToPartner function with ONLY real user connections
-  const connectToPartner = useCallback(() => {
-    if (!socketRef.current || !userId) {
-      console.log("Cannot connect: Socket not initialized or missing userId");
-      return;
-    }
-
-    // Show searching status
-    setIsSearchingForPartner(true);
-    setMessages([]);
-    setConnectionStatus("Searching for a real partner...");
-    setIsConnecting(true);
-    
-    findPartner(socketRef.current);
-    
-    // Set up interval to regularly check for partners
-    const intervalId = setInterval(() => {
-      if (socketRef.current && isSearchingForPartner && !isActiveConnection && !isConnecting) {
-        console.log("Still searching for partner...");
-        findPartner(socketRef.current);
-      } else if (isActiveConnection || !isSearchingForPartner) {
-        clearInterval(intervalId);
-      }
-    }, 5000);
-
-    return () => clearInterval(intervalId);
-  }, [socketRef, userId, isSearchingForPartner, isActiveConnection, isConnecting]);
-
-  // Helper function to find partner
-  const findPartner = useCallback((socket: Socket) => {
-    console.log("Sending find_partner request with userId:", userId);
-    setIsConnecting(true);
-    setIsSearchingForPartner(true);
-    socket.emit("find_partner", userId);
-  }, [userId]);
-
-  // Handle partner disconnection more robustly
-  const handlePartnerDisconnect = () => {
-    console.log("Handling partner disconnect");
-    
-    setIsRealPartner(false);
-    setIsActiveConnection(false);
-    setPartnerId(null);
-    
-    // Clean up peer connection
-    if (peerConnectionRef.current) {
-      // Close all tracks first
-      peerConnectionRef.current.getSenders().forEach(sender => {
-        if (sender.track) {
-          sender.track.stop();
-        }
-      });
-      // Close the connection
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
-    }
-    
-    // Reset video element
-    if (strangerVideoRef.current) {
-      strangerVideoRef.current.srcObject = null;
-    }
-  };
-
-  // Start new chat with another partner
-  const startNewChat = () => {
-    console.log("Starting new chat");
-    
-    // Clear messages and reset state
-    setMessages([]);
-    
-    // Clean up existing connection
-    handlePartnerDisconnect();
-    
-    // Set as not searching initially (will set to true in connectToPartner)
-    setIsSearchingForPartner(false);
-    setConnectionStatus("Click 'New Chat' to find a partner");
-    
-    // Connect to new partner
-    connectToPartner();
-  };
-
-  // Stop searching for partners
-  const stopSearching = () => {
-    console.log("Stopping search");
-    setIsSearchingForPartner(false);
-    setIsConnecting(false);
-    setConnectionStatus("Search stopped. Click 'New Chat' to find a partner");
-    
-    // Clear any timeouts
-    if (partnerConnectionTimeout.current) {
-      clearTimeout(partnerConnectionTimeout.current);
-      partnerConnectionTimeout.current = null;
-    }
-  };
-
-  // Function to send a message to the partner
-  const sendMessage = useCallback(() => {
-    if (inputMessage.trim() === '') return;
-    
-    // Add message to local state immediately
-    setMessages(prev => [...prev, { text: inputMessage, isUser: true }]);
-    const messageToSend = inputMessage;
-    setInputMessage(''); // Clear input field immediately
-    
-    // If connected to a real partner, send via socket
-    if (isRealPartner && socketRef.current && socketRef.current.connected) {
-      // Check if we have a partner ID
-      if (partnerId) {
-        console.log('Sending message to partner via WebSocket:', partnerId);
-        socketRef.current.emit('send_message', { 
-          to: partnerId, // Use the actual partner ID
-          message: messageToSend
-        });
-      } else {
-        console.warn('Cannot send message: no partner ID available');
-      }
-    } else {
-      console.log('Not sending message: no real partner or socket disconnected');
-    }
-  }, [inputMessage, isRealPartner, partnerId]);
-
-  // Handle message input with Enter key
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      sendMessage();
-    }
-  }, [sendMessage]);
+  }, [partnerId, isRealPartner, createPeerConnection]);
 
   // Improved effect to ensure camera access is properly handled
   useEffect(() => {
@@ -771,56 +821,6 @@ const SolmegleChat: React.FC = () => {
       cleanupPeerConnection();
     };
   }, [cleanupPeerConnection]);
-
-  // FIX VIDEO RENDERING: 
-  const renderVideoDisplay = () => {
-    if (isSearchingForPartner) {
-      return (
-        <VideoContainer>
-          <StrangerVideo 
-            autoPlay
-            playsInline
-            muted
-            loop
-            src="/static/static.mp4"
-            disablePictureInPicture
-            controlsList="nodownload nofullscreen noremoteplayback"
-          />
-          <SolmegleWatermark>Solmegle</SolmegleWatermark>
-          <ConnectionStatus>{connectionStatus}</ConnectionStatus>
-        </VideoContainer>
-      );
-    } else if (isRealPartner) {
-      return (
-        <VideoContainer>
-          <StrangerVideo 
-            ref={strangerVideoRef} 
-            autoPlay
-            playsInline
-            disablePictureInPicture
-            controlsList="nodownload nofullscreen noremoteplayback"
-          />
-          <LiveIndicator>LIVE</LiveIndicator>
-        </VideoContainer>
-      );
-    } else {
-      return (
-        <VideoContainer>
-          <StrangerVideo 
-            autoPlay
-            playsInline
-            muted
-            loop
-            src="/static/static.mp4"
-            disablePictureInPicture
-            controlsList="nodownload nofullscreen noremoteplayback"
-          />
-          <SolmegleWatermark>Solmegle</SolmegleWatermark>
-          <ConnectionStatus>Click "New Chat" to start</ConnectionStatus>
-        </VideoContainer>
-      );
-    }
-  };
 
   return (
     <>
