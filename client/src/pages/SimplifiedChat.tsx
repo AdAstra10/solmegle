@@ -25,11 +25,23 @@ const rtcConfig: RTCConfiguration = {
       urls: 'turn:openrelay.metered.ca:443',
       username: 'openrelayproject',
       credential: 'openrelayproject'
+    },
+    // Additional reliable TURN servers
+    {
+      urls: 'turn:global.turn.twilio.com:3478?transport=udp',
+      username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334a2cebc8b250621',
+      credential: 'w1WpauIZ6mkQ6K+G0vgvzBnMoFtF7t0FMnqQ+q+1Cjk='
+    },
+    {
+      urls: 'turn:global.turn.twilio.com:3478?transport=tcp',
+      username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334a2cebc8b250621',
+      credential: 'w1WpauIZ6mkQ6K+G0vgvzBnMoFtF7t0FMnqQ+q+1Cjk='
     }
   ],
   iceCandidatePoolSize: 10,
   bundlePolicy: 'max-bundle' as RTCBundlePolicy,
-  rtcpMuxPolicy: 'require' as RTCRtcpMuxPolicy
+  rtcpMuxPolicy: 'require' as RTCRtcpMuxPolicy,
+  iceTransportPolicy: 'all' // Try 'relay' if connections fail
 };
 
 interface InitializeMediaStreamProps {
@@ -63,6 +75,8 @@ const SolmegleChat: React.FC = () => {
   const [partnerId, setPartnerId] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const partnerConnectionTimeout = useRef<NodeJS.Timeout | null>(null);
+  const connectionMonitorRef = useRef<NodeJS.Timeout | null>(null);
+  const lastIceCandidateTimeRef = useRef<number>(0);
 
   // WebRTC helper functions
   const cleanupPeerConnection = useCallback(() => {
@@ -365,6 +379,48 @@ const SolmegleChat: React.FC = () => {
     const pc = new RTCPeerConnection(rtcConfig);
     peerConnectionRef.current = pc;
     
+    // Monitor connection health and reconnect if stalled
+    if (connectionMonitorRef.current) {
+      clearInterval(connectionMonitorRef.current);
+    }
+    
+    connectionMonitorRef.current = setInterval(() => {
+      if (!peerConnectionRef.current) {
+        clearInterval(connectionMonitorRef.current!);
+        return;
+      }
+      
+      const now = Date.now();
+      const timeSinceLastCandidate = now - lastIceCandidateTimeRef.current;
+      
+      // If we're gathering candidates but haven't received any in 15 seconds
+      if (pc.iceGatheringState === 'gathering' && timeSinceLastCandidate > 15000) {
+        console.warn('ICE gathering seems stalled - attempting reconnection');
+        
+        // Try different ICE transport policy if we're having issues
+        if (retryCountRef.current % 2 === 1 && retryCountRef.current < maxRetries) {
+          console.log('Switching to relay-only ICE policy for better firewall traversal');
+          const newConfig = {...rtcConfig, iceTransportPolicy: 'relay' as RTCIceTransportPolicy};
+          console.log('New config:', newConfig);
+          cleanupPeerConnection();
+          if (socketRef.current && targetUserId) {
+            // Reconnect with new config
+            setTimeout(() => {
+              const pc = new RTCPeerConnection(newConfig);
+              peerConnectionRef.current = pc;
+              // Set up all handlers again
+              createPeerConnection(targetUserId, isInitiator);
+            }, 1000);
+          }
+        }
+      }
+      
+      // Check if connection is healthy
+      if (pc.connectionState === 'connected' && pc.iceConnectionState === 'connected') {
+        console.log('Connection healthy');
+      }
+    }, 5000);
+    
     // Log connection state changes for debugging
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
@@ -437,6 +493,8 @@ const SolmegleChat: React.FC = () => {
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         console.log(`Generated ICE candidate for ${targetUserId} (type: ${event.candidate.type}, protocol: ${event.candidate.protocol})`);
+        lastIceCandidateTimeRef.current = Date.now(); // Update the timestamp
+        
         if (socketRef.current && socketRef.current.connected) {
           socketRef.current.emit('webrtc_ice_candidate', {
             candidate: event.candidate,
@@ -838,6 +896,16 @@ const SolmegleChat: React.FC = () => {
       chatContainerRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (connectionMonitorRef.current) {
+        clearInterval(connectionMonitorRef.current);
+      }
+      cleanupPeerConnection();
+    };
+  }, [cleanupPeerConnection]);
 
   return (
     <>
