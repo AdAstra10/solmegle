@@ -1,0 +1,1 @@
+web: node server-static/server.js 

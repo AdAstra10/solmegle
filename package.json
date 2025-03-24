@@ -2,6 +2,10 @@
   "name": "solmegle",
   "version": "1.0.0",
   "private": true,
+  "scripts": {
+    "build": "sh ./render-build.sh",
+    "start": "node ./server-static/server.js"
+  },
   "engines": {
     "node": "18.x"
   }

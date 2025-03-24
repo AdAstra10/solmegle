@@ -4,72 +4,8 @@ services:
     env: node
     region: oregon
     plan: free
-    buildCommand: |
-      # Create a simple web server to serve static files
-      echo "Building static-only solution for Render.com"
-      
-      # Build client
-      cd client
-      npm install --no-optional
-      npm run build
-      
-      # Create server directory for static files
-      mkdir -p ../server-static
-      
-      # Create a simple Express server for static files
-      cat > ../server-static/server.js << 'EOF'
-      const express = require('express');
-      const path = require('path');
-      const app = express();
-      const PORT = process.env.PORT || 8080;
-      
-      // Serve static files with explicit MIME types
-      app.use(express.static(path.join(__dirname, 'public'), {
-        setHeaders: (res, filePath) => {
-          if (filePath.endsWith('.js')) {
-            res.setHeader('Content-Type', 'application/javascript');
-          } else if (filePath.endsWith('.css')) {
-            res.setHeader('Content-Type', 'text/css');
-          }
-        }
-      }));
-      
-      // SPA fallback
-      app.get('*', (req, res) => {
-        res.sendFile(path.join(__dirname, 'public', 'index.html'));
-      });
-      
-      app.listen(PORT, () => {
-        console.log(`Server running on port ${PORT}`);
-      });
-      EOF
-      
-      # Create package.json for the static server
-      cat > ../server-static/package.json << 'EOF'
-      {
-        "name": "solmegle-static",
-        "version": "1.0.0",
-        "main": "server.js",
-        "dependencies": {
-          "express": "^4.18.2"
-        },
-        "scripts": {
-          "start": "node server.js"
-        },
-        "engines": {
-          "node": "18.x"
-        }
-      }
-      EOF
-      
-      # Copy build to static server public directory
-      mkdir -p ../server-static/public
-      cp -r build/* ../server-static/public/
-      
-      # Install express in static server directory
-      cd ../server-static
-      npm install express
-    startCommand: cd server-static && node server.js
+    buildCommand: npm run build
+    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
