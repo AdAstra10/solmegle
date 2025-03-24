@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "sh ./render-build.sh",
-    "start": "node ./server-static/server.js"
+    "start": "cd server-static && node server.js"
   },
   "engines": {
     "node": "18.x"
