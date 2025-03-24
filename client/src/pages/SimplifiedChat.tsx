@@ -48,6 +48,28 @@ const SolmegleChat: React.FC = () => {
       setIsSearchingForPartner(false);
       setIsRealPartner(true);
       setMessages([]);
+      
+      // When matched with a real user, handle their video stream
+      socket.emit('request_video_stream', partnerId);
+    });
+    
+    socket.on('video_stream', (streamData: any) => {
+      console.log('Received partner video stream data');
+      // Handle video stream data from partner
+      if (strangerVideoRef.current) {
+        try {
+          // Create a MediaStream from the received data
+          const partnerStream = new MediaStream();
+          strangerVideoRef.current.srcObject = partnerStream;
+          
+          // Play the stream
+          strangerVideoRef.current.play()
+            .then(() => console.log("Partner video is now playing"))
+            .catch(err => console.error("Error playing partner video:", err));
+        } catch (error) {
+          console.error('Error setting up partner video:', error);
+        }
+      }
     });
 
     socket.on('user_message', (message: string) => {
@@ -172,22 +194,46 @@ const SolmegleChat: React.FC = () => {
     };
   }, [isRealPartner, getRandomVideoId]);
 
+  // Debugging function to check camera status
+  const logVideoStatus = useCallback(() => {
+    if (userVideoRef.current) {
+      const userVideo = userVideoRef.current;
+      console.log('User video element:', {
+        readyState: userVideo.readyState,
+        paused: userVideo.paused,
+        height: userVideo.videoHeight,
+        width: userVideo.videoWidth,
+        hasStream: userVideo.srcObject !== null,
+        streamActive: userVideo.srcObject ? (userVideo.srcObject as MediaStream).active : false,
+        streamTracks: userVideo.srcObject ? (userVideo.srcObject as MediaStream).getTracks().length : 0
+      });
+    } else {
+      console.log('User video ref is null');
+    }
+  }, [userVideoRef]);
+
+  // Add regular status checking
+  useEffect(() => {
+    if (isCameraAllowed) {
+      const interval = setInterval(() => {
+        logVideoStatus();
+      }, 5000); // Check every 5 seconds
+      return () => clearInterval(interval);
+    }
+  }, [isCameraAllowed, logVideoStatus]);
+
   // Request camera access as soon as the component mounts
   useEffect(() => {
     // Define camera constraints for better quality
     const constraints = {
-      video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        facingMode: "user"
-      },
+      video: true,
       audio: true
     };
 
     // Check if we already have camera access
     navigator.mediaDevices.getUserMedia(constraints)
       .then(stream => {
-        console.log("Camera permission granted");
+        console.log("Camera permission granted, tracks:", stream.getTracks().length);
         if (userVideoRef.current) {
           // Stop any existing tracks
           const existingStream = userVideoRef.current.srcObject as MediaStream;
@@ -198,15 +244,15 @@ const SolmegleChat: React.FC = () => {
           // Set new stream
           userVideoRef.current.srcObject = stream;
           
-          // Force unmute to ensure we can see ourselves
-          userVideoRef.current.muted = true;
-          
           // Ensure video starts playing
-          userVideoRef.current.play().catch(err => {
-            console.error("Error playing user video:", err);
-          });
-          
-          console.log("User video setup complete, should be visible now");
+          userVideoRef.current.play()
+            .then(() => {
+              console.log("User video is now playing");
+              logVideoStatus();
+            })
+            .catch(err => {
+              console.error("Error playing user video:", err);
+            });
         } else {
           console.error("User video ref is null, cannot display camera");
         }
@@ -226,22 +272,18 @@ const SolmegleChat: React.FC = () => {
         }
       }
     };
-  }, []);
+  }, [logVideoStatus]);
 
   const requestCameraAccess = useCallback(() => {
     // Define camera constraints for better quality
     const constraints = {
-      video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        facingMode: "user"
-      },
+      video: true,
       audio: true
     };
 
     navigator.mediaDevices.getUserMedia(constraints)
       .then(stream => {
-        console.log("Camera permission granted on request");
+        console.log("Camera permission granted on request, tracks:", stream.getTracks().length);
         if (userVideoRef.current) {
           // Stop any existing tracks
           const existingStream = userVideoRef.current.srcObject as MediaStream;
@@ -252,15 +294,15 @@ const SolmegleChat: React.FC = () => {
           // Set new stream
           userVideoRef.current.srcObject = stream;
           
-          // Force unmute to ensure we can see ourselves
-          userVideoRef.current.muted = true;
-          
           // Ensure video starts playing
-          userVideoRef.current.play().catch(err => {
-            console.error("Error playing user video:", err);
-          });
-          
-          console.log("User video setup complete, should be visible now");
+          userVideoRef.current.play()
+            .then(() => {
+              console.log("User video is now playing after explicit request");
+              logVideoStatus();
+            })
+            .catch(err => {
+              console.error("Error playing user video:", err);
+            });
         } else {
           console.error("User video ref is null, cannot display camera");
         }
@@ -270,7 +312,7 @@ const SolmegleChat: React.FC = () => {
         console.error('Error accessing camera:', error);
         setIsCameraAllowed(false);
       });
-  }, []);
+  }, [logVideoStatus]);
 
   // Modified startNewChat function
   const startNewChat = useCallback(() => {
@@ -447,13 +489,6 @@ const VideoScreen = styled.div<{ isTop?: boolean }>`
   display: flex;
   justify-content: center;
   align-items: center;
-  
-  video {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-  }
 `;
 
 const ChatMessages = styled.div`
@@ -589,21 +624,16 @@ const VideoContainer = styled.div`
   position: relative;
   width: 100%;
   height: 100%;
+  overflow: hidden;
 `;
 
 const StrangerVideo = styled.video`
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
   background-color: #000;
-  max-height: 100%;
-  max-width: 100%;
+  display: block;
   pointer-events: none; /* Prevent user interaction with the video */
-  display: block; /* Fix potential layout issues */
-  position: absolute; /* Ensure it fills the container */
-  top: 0;
-  left: 0;
-  z-index: 1; /* Make sure it's above any background */
   
   /* Hide controls completely */
   &::-webkit-media-controls-panel,
@@ -631,8 +661,6 @@ const UserVideo = styled.video`
   background-color: #000;
   display: block;
   transform: scaleX(-1); /* Mirror the user's camera for a more natural experience */
-  position: relative; /* Change from absolute to relative */
-  z-index: 5; /* Higher z-index to ensure visibility */
   
   /* Hide controls completely */
   &::-webkit-media-controls-panel,
