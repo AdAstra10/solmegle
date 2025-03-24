@@ -6,6 +6,14 @@ import io, { Socket } from 'socket.io-client';
 // Total videos count constant
 const TOTAL_VIDEOS = 43;
 
+// Configuration for WebRTC
+const rtcConfig = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ]
+};
+
 const SolmegleChat: React.FC = () => {
   const [isCameraAllowed, setIsCameraAllowed] = useState<boolean>(false);
   const [isSearchingForPartner, setIsSearchingForPartner] = useState<boolean>(false);
@@ -20,6 +28,9 @@ const SolmegleChat: React.FC = () => {
   const socketRef = useRef<Socket | null>(null);
   const [waitingUsers, setWaitingUsers] = useState<number>(0);
   const [userId, setUserId] = useState<string>('');
+  // Add WebRTC references
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const userStreamRef = useRef<MediaStream | null>(null);
 
   // Initialize socket connection
   useEffect(() => {
@@ -49,78 +60,57 @@ const SolmegleChat: React.FC = () => {
       setIsRealPartner(true);
       setMessages([]);
       
-      // When matched with a real user, handle their video stream
-      socket.emit('request_video_stream', partnerId);
-      
-      // Add a welcome message
-      setMessages(prev => [...prev, { 
-        text: "You're now chatting with a stranger. Say hi!", 
-        isUser: false 
-      }]);
+      // Create WebRTC peer connection for the matched partner
+      createPeerConnection(partnerId, true); // true = we are the initiator
     });
     
-    // When requested to send our video stream
-    socket.on('send_video_stream', (requestingUserId: string) => {
-      console.log('Sending our video stream to partner:', requestingUserId);
+    // WebRTC signaling
+    socket.on('webrtc_offer', async (data: any) => {
+      if (!peerConnectionRef.current) {
+        createPeerConnection(data.from, false); // false = we are not the initiator
+      }
       
-      // Get our video stream and send it
-      if (userVideoRef.current && userVideoRef.current.srcObject) {
-        // Notify that we're sharing our camera
-        setMessages(prev => [...prev, { 
-          text: "You are sharing your camera with the stranger.", 
-          isUser: false 
-        }]);
+      try {
+        await peerConnectionRef.current?.setRemoteDescription(
+          new RTCSessionDescription(data.offer)
+        );
         
-        try {
-          // Get track data to send
-          const stream = userVideoRef.current.srcObject as MediaStream;
-          const streamData = {
-            id: stream.id,
-            active: stream.active,
-            tracks: stream.getTracks().map(track => ({
-              id: track.id,
-              kind: track.kind,
-              enabled: track.enabled
-            }))
-          };
-          
-          // Send stream data to the partner
-          socket.emit('video_stream_data', {
-            to: requestingUserId,
-            streamData: streamData
-          });
-        } catch (error) {
-          console.error('Error sending video stream:', error);
-        }
-      } else {
-        console.error('No local video stream to share');
+        // Create answer
+        const answer = await peerConnectionRef.current?.createAnswer();
+        await peerConnectionRef.current?.setLocalDescription(answer);
+        
+        // Send answer back
+        socket.emit('webrtc_answer', {
+          answer,
+          to: data.from,
+          from: userId
+        });
+      } catch (error) {
+        console.error('Error handling WebRTC offer:', error);
       }
     });
     
-    socket.on('video_stream', (streamData: any) => {
-      console.log('Received partner video stream data:', streamData);
-      // Handle video stream data from partner
-      if (strangerVideoRef.current) {
-        try {
-          // Create a MediaStream from the received data
-          // This is a placeholder since we can't truly transfer MediaStreams over socket
-          // In a real implementation this would use WebRTC
-          setMessages(prev => [...prev, { 
-            text: "The stranger is sharing their camera.", 
-            isUser: false 
-          }]);
-          
-          // If we have a real stranger's stream, we'll set it up properly
-          // For now, we use a fallback to show that we received their stream
-          if (streamData && streamData.active) {
-            // Visual indicator that we received their stream
-            if (strangerVideoRef.current.classList) {
-              strangerVideoRef.current.classList.add('has-real-stream');
-            }
-          }
-        } catch (error) {
-          console.error('Error setting up partner video:', error);
+    socket.on('webrtc_answer', async (data: any) => {
+      try {
+        await peerConnectionRef.current?.setRemoteDescription(
+          new RTCSessionDescription(data.answer)
+        );
+        console.log('Successfully set remote description from answer');
+      } catch (error) {
+        console.error('Error handling WebRTC answer:', error);
+      }
+    });
+    
+    socket.on('webrtc_ice_candidate', async (data: any) => {
+      try {
+        if (data.candidate) {
+          await peerConnectionRef.current?.addIceCandidate(
+            new RTCIceCandidate(data.candidate)
+          );
+          console.log('Added ICE candidate from partner');
         }
+      } catch (error) {
+        console.error('Error handling ICE candidate:', error);
       }
     });
 
@@ -131,7 +121,10 @@ const SolmegleChat: React.FC = () => {
     socket.on('partner_disconnected', () => {
       console.log('Partner disconnected');
       setIsRealPartner(false);
-      setMessages(prev => [...prev, { text: 'Stranger has disconnected', isUser: false }]);
+      
+      // Cleanup WebRTC on disconnect
+      cleanupPeerConnection();
+      
       // Automatically look for a new partner
       setTimeout(() => {
         connectToPartner();
@@ -139,6 +132,7 @@ const SolmegleChat: React.FC = () => {
     });
 
     return () => {
+      cleanupPeerConnection();
       socket.disconnect();
     };
   }, [userId]);
@@ -168,12 +162,6 @@ const SolmegleChat: React.FC = () => {
         priority: 'high'
       });
       
-      // Add a visual indicator that we're looking for real people
-      setMessages(prev => [...prev, { 
-        text: "Looking for real people first...", 
-        isUser: false 
-      }]);
-      
       // If no match after 7 seconds, fall back to video
       setTimeout(() => {
         if (isSearchingForPartner && !isRealPartner) {
@@ -182,12 +170,6 @@ const SolmegleChat: React.FC = () => {
           setCurrentVideoId(videoId);
           setIsRealPartner(false);
           setIsSearchingForPartner(false);
-          
-          // Add a message explaining we're showing a recording
-          setMessages(prev => [...prev, { 
-            text: "No one is online right now. Showing you a recording instead.", 
-            isUser: false 
-          }]);
         }
       }, 7000);
     } else {
@@ -243,6 +225,67 @@ const SolmegleChat: React.FC = () => {
     }
   }, [userVideoRef]);
 
+  // Request camera access as soon as the component mounts
+  useEffect(() => {
+    // Define camera constraints for better quality
+    const constraints = {
+      video: true,
+      audio: true
+    };
+
+    // Check if we already have camera access
+    navigator.mediaDevices.getUserMedia(constraints)
+      .then(stream => {
+        console.log("Camera permission granted, tracks:", stream.getTracks().length);
+        
+        // Store stream reference for WebRTC
+        userStreamRef.current = stream;
+        
+        if (userVideoRef.current) {
+          // Stop any existing tracks
+          const existingStream = userVideoRef.current.srcObject as MediaStream;
+          if (existingStream) {
+            existingStream.getTracks().forEach(track => track.stop());
+          }
+          
+          // Set new stream
+          userVideoRef.current.srcObject = stream;
+          
+          // Ensure video starts playing
+          userVideoRef.current.play()
+            .then(() => {
+              console.log("User video is now playing");
+              logVideoStatus();
+            })
+            .catch(err => {
+              console.error("Error playing user video:", err);
+            });
+        } else {
+          console.error("User video ref is null, cannot display camera");
+        }
+        setIsCameraAllowed(true);
+      })
+      .catch(error => {
+        console.error('Camera access error:', error);
+        setIsCameraAllowed(false);
+      });
+      
+    // Cleanup function to stop all tracks when component unmounts
+    return () => {
+      if (userStreamRef.current) {
+        userStreamRef.current.getTracks().forEach(track => track.stop());
+        userStreamRef.current = null;
+      }
+      
+      if (userVideoRef.current && userVideoRef.current.srcObject) {
+        const stream = userVideoRef.current.srcObject as MediaStream;
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
+      }
+    };
+  }, [logVideoStatus]);
+
   const requestCameraAccess = useCallback(() => {
     // Define camera constraints for better quality
     const constraints = {
@@ -253,6 +296,10 @@ const SolmegleChat: React.FC = () => {
     navigator.mediaDevices.getUserMedia(constraints)
       .then(stream => {
         console.log("Camera permission granted on request, tracks:", stream.getTracks().length);
+        
+        // Store stream reference for WebRTC
+        userStreamRef.current = stream;
+        
         if (userVideoRef.current) {
           // Stop any existing tracks
           const existingStream = userVideoRef.current.srcObject as MediaStream;
@@ -352,58 +399,6 @@ const SolmegleChat: React.FC = () => {
     }
   }, [isCameraAllowed, logVideoStatus]);
 
-  // Request camera access as soon as the component mounts
-  useEffect(() => {
-    // Define camera constraints for better quality
-    const constraints = {
-      video: true,
-      audio: true
-    };
-
-    // Check if we already have camera access
-    navigator.mediaDevices.getUserMedia(constraints)
-      .then(stream => {
-        console.log("Camera permission granted, tracks:", stream.getTracks().length);
-        if (userVideoRef.current) {
-          // Stop any existing tracks
-          const existingStream = userVideoRef.current.srcObject as MediaStream;
-          if (existingStream) {
-            existingStream.getTracks().forEach(track => track.stop());
-          }
-          
-          // Set new stream
-          userVideoRef.current.srcObject = stream;
-          
-          // Ensure video starts playing
-          userVideoRef.current.play()
-            .then(() => {
-              console.log("User video is now playing");
-              logVideoStatus();
-            })
-            .catch(err => {
-              console.error("Error playing user video:", err);
-            });
-        } else {
-          console.error("User video ref is null, cannot display camera");
-        }
-        setIsCameraAllowed(true);
-      })
-      .catch(error => {
-        console.error('Camera access error:', error);
-        setIsCameraAllowed(false);
-      });
-      
-    // Cleanup function to stop all tracks when component unmounts
-    return () => {
-      if (userVideoRef.current && userVideoRef.current.srcObject) {
-        const stream = userVideoRef.current.srcObject as MediaStream;
-        if (stream) {
-          stream.getTracks().forEach(track => track.stop());
-        }
-      }
-    };
-  }, [logVideoStatus]);
-
   // Modified startNewChat function
   const startNewChat = useCallback(() => {
     if (!isCameraAllowed) {
@@ -431,6 +426,99 @@ const SolmegleChat: React.FC = () => {
     }
   }, [messages]);
 
+  // WebRTC helper functions
+  const createPeerConnection = useCallback((partnerId: string, isInitiator: boolean) => {
+    try {
+      console.log(`Creating peer connection with ${partnerId}, initiator: ${isInitiator}`);
+      
+      // Cleanup any existing connections
+      cleanupPeerConnection();
+      
+      // Create new peer connection
+      const pc = new RTCPeerConnection(rtcConfig);
+      peerConnectionRef.current = pc;
+      
+      // Add our stream to the connection
+      if (userStreamRef.current) {
+        userStreamRef.current.getTracks().forEach(track => {
+          pc.addTrack(track, userStreamRef.current!);
+        });
+      } else {
+        console.error("No local stream to add to peer connection");
+      }
+      
+      // Handle ICE candidates
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          if (socketRef.current) {
+            socketRef.current.emit('webrtc_ice_candidate', {
+              candidate: event.candidate,
+              to: partnerId,
+              from: userId
+            });
+          }
+        }
+      };
+      
+      // Handle connection state changes
+      pc.onconnectionstatechange = () => {
+        console.log(`Connection state changed to: ${pc.connectionState}`);
+        if (pc.connectionState === 'connected') {
+          console.log('Peers successfully connected!');
+        }
+      };
+      
+      // Handle receiving remote stream
+      pc.ontrack = (event) => {
+        console.log('Received remote track!', event.streams[0]);
+        if (strangerVideoRef.current && event.streams[0]) {
+          strangerVideoRef.current.srcObject = event.streams[0];
+          setIsRealPartner(true);
+          console.log('Set stranger video source to remote stream');
+        }
+      };
+      
+      // If we're the initiator, create and send an offer
+      if (isInitiator) {
+        pc.createOffer()
+          .then(offer => pc.setLocalDescription(offer))
+          .then(() => {
+            if (socketRef.current) {
+              socketRef.current.emit('webrtc_offer', {
+                offer: pc.localDescription,
+                to: partnerId,
+                from: userId
+              });
+            }
+          })
+          .catch(err => console.error('Error creating offer:', err));
+      }
+      
+      return pc;
+    } catch (error) {
+      console.error('Error creating peer connection:', error);
+      return null;
+    }
+  }, [userId]);
+  
+  const cleanupPeerConnection = useCallback(() => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.ontrack = null;
+      peerConnectionRef.current.onicecandidate = null;
+      peerConnectionRef.current.onconnectionstatechange = null;
+      
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+      
+      // Clear the stranger video
+      if (strangerVideoRef.current) {
+        strangerVideoRef.current.srcObject = null;
+      }
+      
+      console.log('WebRTC peer connection cleaned up');
+    }
+  }, []);
+
   return (
     <>
       <Header />
@@ -451,6 +539,18 @@ const SolmegleChat: React.FC = () => {
                     controlsList="nodownload nofullscreen noremoteplayback"
                   />
                   <SolmegleWatermark>Solmegle</SolmegleWatermark>
+                </VideoContainer>
+              ) : isRealPartner ? (
+                <VideoContainer>
+                  <StrangerVideo 
+                    ref={strangerVideoRef} 
+                    autoPlay
+                    playsInline
+                    muted={false}
+                    disablePictureInPicture
+                    controlsList="nodownload nofullscreen noremoteplayback"
+                  />
+                  <LiveIndicator>LIVE</LiveIndicator>
                 </VideoContainer>
               ) : currentVideoId ? (
                 <VideoContainer>
@@ -768,6 +868,18 @@ const UserVideo = styled.video`
   &::-webkit-media-controls-enclosure {
     display: none !important;
   }
+`;
+
+const LiveIndicator = styled.div`
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background-color: #09f;
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 700;
 `;
 
 export default SolmegleChat;

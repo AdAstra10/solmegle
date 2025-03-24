@@ -101,27 +101,38 @@ io.on('connection', (socket) => {
     emitWaitingCount();
   });
   
-  // Handle video stream requests
-  socket.on('request_video_stream', (partnerId) => {
-    if (activeConnections.has(partnerId)) {
-      const requestingUserId = socket.userId;
-      const partnerSocket = getSocketByUserId(partnerId);
-      
-      if (partnerSocket) {
-        // Request partner to send their video stream
-        partnerSocket.emit('send_video_stream', requestingUserId);
-      }
+  // WebRTC signaling handlers
+  socket.on('webrtc_offer', (data) => {
+    console.log(`Received WebRTC offer from ${data.from} to ${data.to}`);
+    
+    // Forward the offer to the target user
+    const targetSocket = getSocketByUserId(data.to);
+    if (targetSocket) {
+      targetSocket.emit('webrtc_offer', data);
+    } else {
+      console.log(`Target user ${data.to} not found for WebRTC offer`);
     }
   });
   
-  // Forward video stream data to partner
-  socket.on('video_stream_data', ({ to, streamData }) => {
-    if (activeConnections.has(to)) {
-      const partnerSocket = getSocketByUserId(to);
-      
-      if (partnerSocket) {
-        partnerSocket.emit('video_stream', streamData);
-      }
+  socket.on('webrtc_answer', (data) => {
+    console.log(`Received WebRTC answer from ${data.from} to ${data.to}`);
+    
+    // Forward the answer to the target user
+    const targetSocket = getSocketByUserId(data.to);
+    if (targetSocket) {
+      targetSocket.emit('webrtc_answer', data);
+    } else {
+      console.log(`Target user ${data.to} not found for WebRTC answer`);
+    }
+  });
+  
+  socket.on('webrtc_ice_candidate', (data) => {
+    // Forward ICE candidate to the target user
+    const targetSocket = getSocketByUserId(data.to);
+    if (targetSocket) {
+      targetSocket.emit('webrtc_ice_candidate', data);
+    } else {
+      console.log(`Target user ${data.to} not found for ICE candidate`);
     }
   });
   
