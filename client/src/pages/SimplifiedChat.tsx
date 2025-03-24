@@ -198,10 +198,17 @@ const SolmegleChat: React.FC = () => {
           // Set new stream
           userVideoRef.current.srcObject = stream;
           
+          // Force unmute to ensure we can see ourselves
+          userVideoRef.current.muted = true;
+          
           // Ensure video starts playing
           userVideoRef.current.play().catch(err => {
             console.error("Error playing user video:", err);
           });
+          
+          console.log("User video setup complete, should be visible now");
+        } else {
+          console.error("User video ref is null, cannot display camera");
         }
         setIsCameraAllowed(true);
       })
@@ -245,10 +252,17 @@ const SolmegleChat: React.FC = () => {
           // Set new stream
           userVideoRef.current.srcObject = stream;
           
+          // Force unmute to ensure we can see ourselves
+          userVideoRef.current.muted = true;
+          
           // Ensure video starts playing
           userVideoRef.current.play().catch(err => {
             console.error("Error playing user video:", err);
           });
+          
+          console.log("User video setup complete, should be visible now");
+        } else {
+          console.error("User video ref is null, cannot display camera");
         }
         setIsCameraAllowed(true);
       })
@@ -338,8 +352,14 @@ const SolmegleChat: React.FC = () => {
               {/* User's video */}
               {isCameraAllowed ? (
                 <VideoContainer>
-                  <UserVideo ref={userVideoRef} autoPlay muted playsInline />
-                  <UserWatermark>You</UserWatermark>
+                  <UserVideo 
+                    ref={userVideoRef} 
+                    autoPlay 
+                    muted 
+                    playsInline 
+                    onLoadedMetadata={() => console.log("User video metadata loaded")}
+                    onPlay={() => console.log("User video started playing")}
+                  />
                 </VideoContainer>
               ) : (
                 <CameraBlockedSection>
@@ -607,17 +627,12 @@ const StrangerVideo = styled.video`
 const UserVideo = styled.video`
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
   background-color: #000;
-  max-height: 100%;
-  max-width: 100%;
   display: block;
-  position: absolute;
-  top: 0;
-  left: 0;
-  z-index: 1;
-  border: 2px solid #09f; /* Add a border to highlight that this is the user's video */
-  box-sizing: border-box;
+  transform: scaleX(-1); /* Mirror the user's camera for a more natural experience */
+  position: relative; /* Change from absolute to relative */
+  z-index: 5; /* Higher z-index to ensure visibility */
   
   /* Hide controls completely */
   &::-webkit-media-controls-panel,
@@ -635,18 +650,6 @@ const UserVideo = styled.video`
   &::-webkit-media-controls-enclosure {
     display: none !important;
   }
-`;
-
-const UserWatermark = styled.div`
-  position: absolute;
-  bottom: 10px;
-  right: 10px;
-  color: #ff6600;
-  font-size: 1.5rem;
-  font-weight: 700;
-  font-family: Arial, sans-serif;
-  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
-  z-index: 10;
 `;
 
 export default SolmegleChat;
