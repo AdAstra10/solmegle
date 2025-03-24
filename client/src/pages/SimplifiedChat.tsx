@@ -1,35 +1,82 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import styled from 'styled-components';
+import styled, { ThemeProvider } from 'styled-components';
 import Header from '../components/Header';
+import { defaultTheme } from '../styles/theme';
+import io, { Socket } from 'socket.io-client';
 
 // Total videos count constant
 const TOTAL_VIDEOS = 43;
 
 const SolmegleChat: React.FC = () => {
-  const [hasCameraAccess, setHasCameraAccess] = useState(false);
-  const [isSearchingForPartner, setIsSearchingForPartner] = useState(false);
-  const [messageInput, setMessageInput] = useState('');
-  const [messages, setMessages] = useState<{text: string; isUser: boolean}[]>([]);
-  
-  // Add states for fallback videos
+  const [isCameraAllowed, setIsCameraAllowed] = useState<boolean>(false);
+  const [isSearchingForPartner, setIsSearchingForPartner] = useState<boolean>(false);
   const [currentVideoId, setCurrentVideoId] = useState<number | null>(null);
-  const [isRealPartner, setIsRealPartner] = useState(false);
-  
+  const [isRealPartner, setIsRealPartner] = useState<boolean>(false);
+  const [messages, setMessages] = useState<{ text: string; isUser: boolean }[]>([]);
+  const [inputMessage, setInputMessage] = useState<string>('');
   const userVideoRef = useRef<HTMLVideoElement>(null);
   const strangerVideoRef = useRef<HTMLVideoElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  // Add socket reference
+  const socketRef = useRef<Socket | null>(null);
+  const [waitingUsers, setWaitingUsers] = useState<number>(0);
+  const [userId, setUserId] = useState<string>('');
 
-  // Function to get random video ID
+  // Initialize socket connection
+  useEffect(() => {
+    // Create socket connection
+    const socket = io(window.location.origin);
+    socketRef.current = socket;
+
+    // Generate unique user ID if not already set
+    if (!userId) {
+      const newUserId = 'user_' + Math.random().toString(36).substr(2, 9);
+      setUserId(newUserId);
+    }
+
+    // Socket event listeners
+    socket.on('connect', () => {
+      console.log('Connected to server');
+    });
+
+    socket.on('waiting_count', (count: number) => {
+      setWaitingUsers(count);
+      console.log(`Users waiting for match: ${count}`);
+    });
+
+    socket.on('matched', (partnerId: string) => {
+      console.log(`Matched with user: ${partnerId}`);
+      setIsSearchingForPartner(false);
+      setIsRealPartner(true);
+      setMessages([]);
+    });
+
+    socket.on('user_message', (message: string) => {
+      setMessages(prev => [...prev, { text: message, isUser: false }]);
+    });
+
+    socket.on('partner_disconnected', () => {
+      console.log('Partner disconnected');
+      setIsRealPartner(false);
+      setMessages(prev => [...prev, { text: 'Stranger has disconnected', isUser: false }]);
+      // Automatically look for a new partner
+      setTimeout(() => {
+        connectToPartner();
+      }, 3000);
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [userId]);
+
+  // Function to get a random video ID
   const getRandomVideoId = useCallback(() => {
-    // Avoid showing the same video twice in a row
-    let newId;
-    do {
-      newId = Math.floor(Math.random() * TOTAL_VIDEOS) + 1;
-    } while (newId === currentVideoId);
-    return newId;
-  }, [currentVideoId]);
+    // Generate a random number between 1 and 43 (assuming we have 43 videos)
+    return Math.floor(Math.random() * 43) + 1;
+  }, []);
 
-  // Update connectToPartner to prioritize real user connections
+  // Enhanced connectToPartner function that prioritizes real users
   const connectToPartner = useCallback(() => {
     // Clear all messages for the new session
     setMessages([]);
@@ -38,60 +85,58 @@ const SolmegleChat: React.FC = () => {
     setIsSearchingForPartner(true);
     setCurrentVideoId(null);
     
-    // Function to check for real users
-    const checkForRealUsers = () => {
-      // This would be a real API check in production
-      // For now, we simulate the check
-      const hasRealPartners = false; // Replace with actual API call
+    // First, attempt to find real users
+    if (socketRef.current) {
+      console.log('Searching for real partners...');
+      socketRef.current.emit('find_partner', userId);
       
-      if (hasRealPartners) {
-        // Real user connection logic would go here
-        setIsRealPartner(true);
-        setIsSearchingForPartner(false);
-        // More implementation for real connection
-      } else {
-        // If no real users found after 5 seconds, use fallback video
-        const videoId = getRandomVideoId();
-        console.log(`No real partners found. Loading video: ${videoId}.mp4`);
-        setCurrentVideoId(videoId);
-        setIsRealPartner(false);
-        setIsSearchingForPartner(false);
-      }
-    };
-
-    // Try to find real users multiple times before falling back to video
-    let attempts = 0;
-    const maxAttempts = 3;
-    const attemptInterval = 1500; // 1.5 seconds between attempts
-
-    const findUser = () => {
-      if (attempts < maxAttempts) {
-        console.log(`Searching for real users... Attempt ${attempts + 1}/${maxAttempts}`);
-        // This would be your actual user matching logic
-        const hasMatch = false; // Replace with real matching logic
-        
-        if (hasMatch) {
-          // Found a real user
-          setIsRealPartner(true);
+      // Listen for matches or timeouts
+      // Note: The socket listeners are set up in the useEffect
+      
+      // If no match after 7 seconds, fall back to video
+      setTimeout(() => {
+        if (isSearchingForPartner && !isRealPartner) {
+          console.log('No real partners found within timeout, falling back to video');
+          const videoId = getRandomVideoId();
+          setCurrentVideoId(videoId);
+          setIsRealPartner(false);
           setIsSearchingForPartner(false);
-          // Implement real connection logic here
-        } else {
-          attempts++;
-          setTimeout(findUser, attemptInterval);
         }
-      } else {
-        // After all attempts, fall back to video
-        const videoId = getRandomVideoId();
-        console.log(`No real partners found after ${maxAttempts} attempts. Loading video: ${videoId}.mp4`);
-        setCurrentVideoId(videoId);
-        setIsRealPartner(false);
-        setIsSearchingForPartner(false);
-      }
-    };
+      }, 7000);
+    } else {
+      // Socket not connected, fall back to video immediately
+      console.log('Socket not connected, falling back to video');
+      const videoId = getRandomVideoId();
+      setCurrentVideoId(videoId);
+      setIsRealPartner(false);
+      setIsSearchingForPartner(false);
+    }
+  }, [getRandomVideoId, userId, isRealPartner, isSearchingForPartner]);
 
-    // Start searching for real users
-    findUser();
-  }, [getRandomVideoId, setMessages]);
+  // Function to send a message to the partner
+  const sendMessage = useCallback(() => {
+    if (inputMessage.trim() === '') return;
+    
+    // Add message to local state
+    setMessages(prev => [...prev, { text: inputMessage, isUser: true }]);
+    
+    // If connected to a real partner, send via socket
+    if (isRealPartner && socketRef.current) {
+      socketRef.current.emit('send_message', { 
+        to: userId, // server will know the partner
+        message: inputMessage 
+      });
+    }
+    
+    setInputMessage('');
+  }, [inputMessage, isRealPartner, userId]);
+
+  // Handle message input with Enter key
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      sendMessage();
+    }
+  }, [sendMessage]);
 
   // Add video ended event listener
   useEffect(() => {
@@ -137,11 +182,11 @@ const SolmegleChat: React.FC = () => {
         if (userVideoRef.current) {
           userVideoRef.current.srcObject = stream;
         }
-        setHasCameraAccess(true);
+        setIsCameraAllowed(true);
       })
       .catch(error => {
         console.error('Camera access error:', error);
-        setHasCameraAccess(false);
+        setIsCameraAllowed(false);
       });
   }, []);
 
@@ -151,17 +196,17 @@ const SolmegleChat: React.FC = () => {
         if (userVideoRef.current) {
           userVideoRef.current.srcObject = stream;
         }
-        setHasCameraAccess(true);
+        setIsCameraAllowed(true);
       })
       .catch(error => {
         console.error('Error accessing camera:', error);
-        setHasCameraAccess(false);
+        setIsCameraAllowed(false);
       });
   }, [userVideoRef]);
 
   // Modified startNewChat function
   const startNewChat = useCallback(() => {
-    if (!hasCameraAccess) {
+    if (!isCameraAllowed) {
       requestCameraAccess();
       return;
     }
@@ -170,30 +215,21 @@ const SolmegleChat: React.FC = () => {
     
     // Connect to a new partner (or fallback video)
     connectToPartner();
-  }, [hasCameraAccess, requestCameraAccess, setMessages, connectToPartner]);
+  }, [isCameraAllowed, requestCameraAccess, setMessages, connectToPartner]);
 
   // Initiate a connection when the component mounts and camera access is granted
   useEffect(() => {
-    if (hasCameraAccess && currentVideoId === null && !isSearchingForPartner) {
+    if (isCameraAllowed && currentVideoId === null && !isSearchingForPartner) {
       connectToPartner();
     }
-  }, [hasCameraAccess, currentVideoId, isSearchingForPartner, connectToPartner]);
+  }, [isCameraAllowed, currentVideoId, isSearchingForPartner, connectToPartner]);
 
   // Add useEffect to scroll to bottom of messages
   useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages]);
-
-  // Update the sendMessage function to remove automatic stranger response
-  const sendMessage = () => {
-    if (messageInput.trim() === '') return;
-    
-    // Add only user message
-    setMessages([...messages, { text: messageInput, isUser: true }]);
-    setMessageInput('');
-  };
 
   return (
     <>
@@ -246,7 +282,7 @@ const SolmegleChat: React.FC = () => {
             </VideoScreen>
             <VideoScreen>
               {/* User's video */}
-              {hasCameraAccess ? (
+              {isCameraAllowed ? (
                 <video ref={userVideoRef} autoPlay muted playsInline />
               ) : (
                 <CameraBlockedSection>
@@ -266,14 +302,14 @@ const SolmegleChat: React.FC = () => {
                   {message.text}
                 </MessageBubble>
               ))}
-              <div ref={messagesEndRef} />
+              <div ref={chatContainerRef} />
             </ChatMessages>
             <ChatInputArea>
               <MessageInput 
                 placeholder="Type a message..." 
-                value={messageInput}
-                onChange={(e) => setMessageInput(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+                value={inputMessage}
+                onChange={(e) => setInputMessage(e.target.value)}
+                onKeyDown={handleKeyDown}
               />
               <SendButton onClick={sendMessage}>Send</SendButton>
             </ChatInputArea>

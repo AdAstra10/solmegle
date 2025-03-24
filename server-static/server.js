@@ -1,28 +1,3 @@
-#!/bin/bash
-
-# Build script for Render.com deployment
-
-# Exit on error
-set -e
-
-# Build the client
-echo "Building the client..."
-cd client
-npm install
-npm run build
-cd ..
-
-# Create server-static directory if it doesn't exist
-mkdir -p server-static
-
-# Copy static files
-echo "Copying static files..."
-cp -r client/build/* server-static/
-
-# Set up a simple Node.js server to serve the static files with WebSocket support
-echo "Setting up static server..."
-cd server-static
-cat > server.js << 'EOF'
 const express = require('express');
 const path = require('path');
 const http = require('http');
@@ -169,11 +144,4 @@ function getSocketByUserId(userId) {
 
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-});
-EOF
-
-# Initialize a new Node.js project and install dependencies
-npm init -y
-npm install express socket.io
-
-echo "Build completed successfully!" 
+}); 
