@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import styled, { ThemeProvider } from 'styled-components';
+import styled from 'styled-components';
 import Header from '../components/Header';
-import { defaultTheme } from '../styles/theme';
 import io, { Socket } from 'socket.io-client';
 
 // Total videos count constant
