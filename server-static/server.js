@@ -32,6 +32,9 @@ const activeConnections = new Map(); // userId -> partnerId
 io.on('connection', (socket) => {
   console.log('New user connected:', socket.id);
   
+  // Store the socket ID as a backup userId if none is provided
+  socket.userId = socket.id;
+  
   // Update waiting count for all connected users
   const emitWaitingCount = () => {
     io.emit('waiting_count', waitingUsers.size);
@@ -39,9 +42,21 @@ io.on('connection', (socket) => {
   
   // Find partner function with priority matching
   socket.on('find_partner', (data) => {
-    // Handle both old and new format
-    const userId = typeof data === 'object' ? data.userId : data;
-    const priority = (typeof data === 'object' && data.priority) ? data.priority : 'normal';
+    let userId;
+    let priority = 'normal';
+    
+    // Handle different formats of data (string or object)
+    if (typeof data === 'string') {
+      userId = data;
+    } else if (typeof data === 'object' && data !== null) {
+      userId = data.userId || socket.id;
+      priority = data.priority || 'normal';
+    } else {
+      userId = socket.id;
+    }
+    
+    // Always assign the userId to the socket for easier reference
+    socket.userId = userId;
     
     console.log(`User ${userId} is looking for a partner (priority: ${priority})`);
     
@@ -60,9 +75,6 @@ io.on('connection', (socket) => {
     
     // Remove from waiting list if already waiting
     waitingUsers.delete(userId);
-    
-    // Store socket reference with the user ID for easier lookup
-    socket.userId = userId;
     
     // Find an available partner with prioritization
     if (waitingUsers.size > 0) {
@@ -133,6 +145,8 @@ io.on('connection', (socket) => {
   });
   
   socket.on('webrtc_ice_candidate', (data) => {
+    console.log(`Received ICE candidate from ${data.from} to ${data.to}`);
+    
     // Forward ICE candidate to the target user
     const targetSocket = getSocketByUserId(data.to);
     if (targetSocket) {
@@ -143,14 +157,28 @@ io.on('connection', (socket) => {
   });
   
   // Handle messages
-  socket.on('send_message', ({ to, message }) => {
+  socket.on('send_message', (data) => {
+    // Determine the recipient
+    const to = data.to;
+    const message = data.message;
+    
+    if (!to || !message) {
+      console.log('Invalid message format:', data);
+      return;
+    }
+    
+    // Get the partner ID from the active connections
     if (activeConnections.has(to)) {
       const partnerId = activeConnections.get(to);
       const partnerSocket = getSocketByUserId(partnerId);
       
       if (partnerSocket) {
         partnerSocket.emit('user_message', message);
+      } else {
+        console.log(`Partner socket not found for ${partnerId}`);
       }
+    } else {
+      console.log(`No active connection found for ${to}`);
     }
   });
   
@@ -186,11 +214,12 @@ io.on('connection', (socket) => {
 
 // Helper function to get socket by userId
 function getSocketByUserId(userId) {
+  // First check if the user is in the waiting list
   if (waitingUsers.has(userId)) {
     return waitingUsers.get(userId).socket;
   }
   
-  // If not in waiting list, check all sockets
+  // If not in waiting list, check all connected sockets
   for (const socket of io.sockets.sockets.values()) {
     if (socket.userId === userId) {
       return socket;
