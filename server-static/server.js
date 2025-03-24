@@ -46,6 +46,11 @@ io.on('connection', (socket) => {
   console.log(`Current active connections: ${activeConnections.size / 2} pairs`);
   console.log(`Current waiting users: ${waitingUsers.size}`);
   
+  // CRITICAL FIX: Auto-heartbeat to keep connections alive
+  const heartbeatInterval = setInterval(() => {
+    socket.emit('heartbeat', { time: Date.now() });
+  }, 25000); // Every 25 seconds
+  
   // Update waiting count for all connected users
   const emitWaitingCount = () => {
     const count = waitingUsers.size;
@@ -54,11 +59,21 @@ io.on('connection', (socket) => {
   };
   
   // CRITICAL FIX: Simplified find_partner with clearer matching logic
-  socket.on('find_partner', (data) => {
+  socket.on('find_partner', (data, callback) => {
     // Always use socket.id as userId for reliability
     const userId = socket.id;
     
     console.log(`User ${userId} is looking for a partner`);
+    
+    // Send acknowledgment if callback is provided
+    if (typeof callback === 'function') {
+      try {
+        callback({ success: true });
+        console.log(`Sent acknowledgment to ${userId} for find_partner request`);
+      } catch (err) {
+        console.error(`Error sending acknowledgment to ${userId}:`, err);
+      }
+    }
     
     // If user is already in an active connection, disconnect them first
     if (activeConnections.has(userId)) {
@@ -200,10 +215,19 @@ io.on('connection', (socket) => {
     }
   });
   
-  // CRITICAL FIX: Improved disconnection handling
+  // CRITICAL FIX: Add a keep-alive handler to reset timeouts
+  socket.on('heartbeat_response', () => {
+    // Reset any connection timeouts
+    console.log(`Heartbeat received from ${socket.id}`);
+  });
+  
+  // CRITICAL FIX: Improved disconnection handling - removed duplicate handler
   socket.on('disconnect', () => {
     const userId = socket.id;
     console.log('User disconnected:', userId);
+    
+    // Clear the heartbeat interval
+    clearInterval(heartbeatInterval);
     
     // Remove from waiting list
     waitingUsers.delete(userId);
@@ -237,10 +261,6 @@ io.on('connection', (socket) => {
     console.log(`Connection log entries: ${connectionLog.size}`);
     console.log(`============================`);
   }, 30000); // Every 30 seconds
-  
-  socket.on('disconnect', () => {
-    clearInterval(statsInterval);
-  });
 });
 
 // Start server

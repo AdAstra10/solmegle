@@ -196,13 +196,42 @@ const SolmegleChat: React.FC = () => {
     console.log("Sending find_partner request with userId:", userId);
     setIsConnecting(true);
     setIsSearchingForPartner(true);
-    socket.emit("find_partner", userId);
+    
+    // CRITICAL FIX: Enhanced reliability with confirmation and retry
+    try {
+      socket.emit("find_partner", userId, (ack: any) => {
+        if (ack && ack.success) {
+          console.log("Server acknowledged find_partner request");
+        } else {
+          console.log("No acknowledgement for find_partner, will retry");
+          // Retry after a short delay
+          setTimeout(() => {
+            if (socket.connected) {
+              console.log("Retrying find_partner");
+              socket.emit("find_partner", userId);
+            }
+          }, 1000);
+        }
+      });
+    } catch (error) {
+      console.error("Error sending find_partner request:", error);
+      // Fallback if emit throws an error
+      setTimeout(() => {
+        if (socket.connected) {
+          console.log("Retrying find_partner after error");
+          socket.emit("find_partner", userId);
+        }
+      }, 1000);
+    }
   }, [userId]);
 
   // Enhanced connectToPartner function with ONLY real user connections
   const connectToPartner = useCallback(() => {
     if (!socketRef.current || !userId) {
       console.log("Cannot connect: Socket not initialized or missing userId");
+      // Set a flag to try connecting again after socket is initialized
+      setIsSearchingForPartner(true);
+      setConnectionStatus("Waiting for connection...");
       return;
     }
 
@@ -212,19 +241,44 @@ const SolmegleChat: React.FC = () => {
     setConnectionStatus("Searching for a real partner...");
     setIsConnecting(true);
     
+    // Force socket reconnection if it's not connected - critical for reliability
+    if (!socketRef.current.connected) {
+      console.log("Socket not connected - reconnecting");
+      socketRef.current.connect();
+      
+      // Set a timeout to check if socket reconnected
+      setTimeout(() => {
+        if (socketRef.current && socketRef.current.connected) {
+          console.log("Socket reconnected successfully, now finding partner");
+          findPartner(socketRef.current);
+        } else {
+          console.log("Socket reconnection failed, showing error");
+          setConnectionStatus("Connection failed. Please try again.");
+          setIsConnecting(false);
+        }
+      }, 2000);
+      
+      return;
+    }
+    
+    // Socket is connected, find a partner
     findPartner(socketRef.current);
     
-    // Set up interval to regularly check for partners
+    // Set up interval to regularly check for partners with increased frequency
     const intervalId = setInterval(() => {
-      if (socketRef.current && isSearchingForPartner && !isActiveConnection && !isConnecting) {
+      if (socketRef.current && socketRef.current.connected && isSearchingForPartner && !isActiveConnection && !isConnecting) {
         console.log("Still searching for partner...");
         findPartner(socketRef.current);
-      } else if (isActiveConnection || !isSearchingForPartner) {
+      } else if (!isSearchingForPartner || isActiveConnection) {
+        console.log("Stopping partner search interval");
         clearInterval(intervalId);
       }
-    }, 5000);
+    }, 3000); // Check more frequently (every 3 seconds)
 
-    return () => clearInterval(intervalId);
+    return () => {
+      console.log("Cleaning up partner search interval");
+      clearInterval(intervalId);
+    };
   }, [socketRef, userId, isSearchingForPartner, isActiveConnection, isConnecting, findPartner]);
 
   // Function to create and return a new RTCPeerConnection
@@ -234,7 +288,7 @@ const SolmegleChat: React.FC = () => {
     // Cleanup any existing connections
     cleanupPeerConnection();
     
-    // Create new peer connection with simplified config
+    // CRITICAL FIX: Simplify configuration and ensure it works with mobile networks
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -255,6 +309,27 @@ const SolmegleChat: React.FC = () => {
     
     peerConnectionRef.current = pc;
     
+    // Add connection state monitoring
+    const connectionMonitor = setInterval(() => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        console.log(`Connection monitor: WebRTC state is ${pc.connectionState}, attempting recovery`);
+        
+        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+          console.log('ICE connection failed, trying to restart ICE');
+          try {
+            // Try to restart ICE
+            pc.restartIce();
+            console.log('ICE restart initiated');
+          } catch (err) {
+            console.error('Error restarting ICE:', err);
+          }
+        }
+      }
+    }, 5000);
+    
+    // Store the interval reference for cleanup
+    connectionMonitorRef.current = connectionMonitor;
+    
     // Add simple connection state logging
     pc.onconnectionstatechange = () => {
       console.log(`Connection state changed to: ${pc.connectionState}`);
@@ -264,6 +339,7 @@ const SolmegleChat: React.FC = () => {
         console.log('WebRTC connection established successfully!');
         setIsRealPartner(true);
         setIsActiveConnection(true);
+        setIsConnecting(false);
       } else if (pc.connectionState === 'failed') {
         console.warn('WebRTC connection failed, attempting reconnect');
         // Try to restart the connection after a short delay
@@ -272,6 +348,22 @@ const SolmegleChat: React.FC = () => {
             findPartner(socketRef.current);
           }
         }, 2000);
+      }
+    };
+    
+    // Add ICE connection state monitoring for more detailed diagnostics
+    pc.oniceconnectionstatechange = () => {
+      console.log(`ICE connection state changed to: ${pc.iceConnectionState}`);
+      
+      if (pc.iceConnectionState === 'disconnected') {
+        console.log('ICE disconnected - this may be temporary');
+        setConnectionStatus('Connection unstable - trying to recover...');
+      } else if (pc.iceConnectionState === 'failed') {
+        console.log('ICE connection failed');
+        setConnectionStatus('Connection failed - trying to reconnect...');
+      } else if (pc.iceConnectionState === 'connected') {
+        console.log('ICE connected successfully');
+        setConnectionStatus('Connected');
       }
     };
     
@@ -532,6 +624,61 @@ const SolmegleChat: React.FC = () => {
         // Set userId if not already set
         if (newSocket.id && (!userId || userId.trim() === '')) {
           setUserId(newSocket.id);
+        }
+        
+        // Re-emit find_partner if we were searching when connection was lost
+        if (isSearchingForPartner && !isActiveConnection) {
+          console.log("Reconnected while searching - reinitiating partner search");
+          setTimeout(() => {
+            findPartner(newSocket);
+          }, 1000);
+        }
+      });
+      
+      // CRITICAL FIX: Add socket disconnect and reconnect handlers
+      newSocket.on("disconnect", (reason) => {
+        console.log(`Socket disconnected: ${reason}`);
+        setConnectionStatus(`Connection lost: ${reason}. Reconnecting...`);
+      });
+      
+      newSocket.on("reconnect", (attemptNumber) => {
+        console.log(`Socket reconnected after ${attemptNumber} attempts`);
+        setConnectionStatus("Reconnected to server!");
+        
+        // Try to reinitiate partner search if we were searching
+        if (isSearchingForPartner && !isActiveConnection) {
+          console.log("Reconnected while searching - restarting partner search");
+          setTimeout(() => {
+            findPartner(newSocket);
+          }, 1000);
+        }
+      });
+      
+      newSocket.on("reconnect_attempt", (attemptNumber) => {
+        console.log(`Socket reconnect attempt #${attemptNumber}`);
+        setConnectionStatus(`Reconnecting... (attempt ${attemptNumber})`);
+      });
+      
+      newSocket.on("reconnect_error", (error) => {
+        console.log(`Socket reconnect error:`, error);
+        setConnectionStatus("Reconnection error. Please refresh the page.");
+      });
+      
+      newSocket.on("reconnect_failed", () => {
+        console.log(`Socket reconnect failed after all attempts`);
+        setConnectionStatus("Reconnection failed. Please refresh the page.");
+      });
+      
+      // CRITICAL FIX: Handle heartbeat to prevent disconnection
+      newSocket.on("heartbeat", (data) => {
+        // Respond to heartbeat to keep connection alive
+        console.log("Received heartbeat from server, responding");
+        newSocket.emit("heartbeat_response");
+        
+        // Check if we need to reconnect
+        if (isSearchingForPartner && !isActiveConnection && !isConnecting) {
+          console.log("Heartbeat check: still looking for partner");
+          findPartner(newSocket);
         }
       });
 
