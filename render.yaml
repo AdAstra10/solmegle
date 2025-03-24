@@ -5,13 +5,24 @@ services:
     region: oregon
     plan: free
     buildCommand: |
-      # Install dependencies for both server and client
-      cd client && npm install && npm run build
-      cd ../server && npm install --no-optional && npm run build
+      # Clean package-lock.json and node_modules
+      rm -rf package-lock.json client/package-lock.json server/package-lock.json
+      rm -rf node_modules client/node_modules server/node_modules
+      # Install and build client
+      cd client 
+      npm install
+      npm run build
+      # Copy client build to server public
+      mkdir -p ../server/public
+      cp -r build/* ../server/public/
+      # Install and build server
+      cd ../server
+      npm install
+      npm run build
     startCommand: cd server && node dist/index.js
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 8080
-    healthCheckPath: / 
+    healthCheckPath: /health 

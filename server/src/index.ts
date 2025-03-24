@@ -61,7 +61,32 @@ app.use('/api', limiter);
 
 // Serve static files from the client build directory
 const clientBuildPath = path.resolve(__dirname, '../../client/build');
-app.use(express.static(clientBuildPath));
+// Explicitly set MIME types for common files
+app.use(express.static(clientBuildPath, {
+  setHeaders: (res, path) => {
+    if (path.endsWith('.js')) {
+      res.setHeader('Content-Type', 'application/javascript');
+    } else if (path.endsWith('.css')) {
+      res.setHeader('Content-Type', 'text/css');
+    } else if (path.endsWith('.json')) {
+      res.setHeader('Content-Type', 'application/json');
+    }
+  }
+}));
+
+// Fallback for public directory if client/build doesn't exist
+const publicPath = path.resolve(__dirname, '../public');
+app.use(express.static(publicPath, {
+  setHeaders: (res, path) => {
+    if (path.endsWith('.js')) {
+      res.setHeader('Content-Type', 'application/javascript');
+    } else if (path.endsWith('.css')) {
+      res.setHeader('Content-Type', 'text/css');
+    } else if (path.endsWith('.json')) {
+      res.setHeader('Content-Type', 'application/json');
+    }
+  }
+}));
 
 // Routes
 app.use('/api/users', userRoutes);
@@ -69,6 +94,28 @@ app.use('/api/users', userRoutes);
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
+});
+
+// Debug static files endpoint
+app.get('/debug-static', (req, res) => {
+  const clientBuildExists = require('fs').existsSync(clientBuildPath);
+  const publicExists = require('fs').existsSync(publicPath);
+  
+  const clientFiles = clientBuildExists ? 
+    require('fs').readdirSync(clientBuildPath).slice(0, 10) : [];
+  const publicFiles = publicExists ? 
+    require('fs').readdirSync(publicPath).slice(0, 10) : [];
+  
+  res.json({
+    clientBuildPath,
+    publicPath,
+    clientBuildExists,
+    publicExists,
+    clientFiles,
+    publicFiles,
+    nodeEnv: process.env.NODE_ENV,
+    cwd: process.cwd()
+  });
 });
 
 // Catch-all route for SPA
