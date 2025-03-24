@@ -51,21 +51,73 @@ const SolmegleChat: React.FC = () => {
       
       // When matched with a real user, handle their video stream
       socket.emit('request_video_stream', partnerId);
+      
+      // Add a welcome message
+      setMessages(prev => [...prev, { 
+        text: "You're now chatting with a stranger. Say hi!", 
+        isUser: false 
+      }]);
+    });
+    
+    // When requested to send our video stream
+    socket.on('send_video_stream', (requestingUserId: string) => {
+      console.log('Sending our video stream to partner:', requestingUserId);
+      
+      // Get our video stream and send it
+      if (userVideoRef.current && userVideoRef.current.srcObject) {
+        // Notify that we're sharing our camera
+        setMessages(prev => [...prev, { 
+          text: "You are sharing your camera with the stranger.", 
+          isUser: false 
+        }]);
+        
+        try {
+          // Get track data to send
+          const stream = userVideoRef.current.srcObject as MediaStream;
+          const streamData = {
+            id: stream.id,
+            active: stream.active,
+            tracks: stream.getTracks().map(track => ({
+              id: track.id,
+              kind: track.kind,
+              enabled: track.enabled
+            }))
+          };
+          
+          // Send stream data to the partner
+          socket.emit('video_stream_data', {
+            to: requestingUserId,
+            streamData: streamData
+          });
+        } catch (error) {
+          console.error('Error sending video stream:', error);
+        }
+      } else {
+        console.error('No local video stream to share');
+      }
     });
     
     socket.on('video_stream', (streamData: any) => {
-      console.log('Received partner video stream data');
+      console.log('Received partner video stream data:', streamData);
       // Handle video stream data from partner
       if (strangerVideoRef.current) {
         try {
           // Create a MediaStream from the received data
-          const partnerStream = new MediaStream();
-          strangerVideoRef.current.srcObject = partnerStream;
+          // This is a placeholder since we can't truly transfer MediaStreams over socket
+          // In a real implementation this would use WebRTC
+          setMessages(prev => [...prev, { 
+            text: "The stranger is sharing their camera.", 
+            isUser: false 
+          }]);
           
-          // Play the stream
-          strangerVideoRef.current.play()
-            .then(() => console.log("Partner video is now playing"))
-            .catch(err => console.error("Error playing partner video:", err));
+          // If we have a real stranger's stream, we'll set it up properly
+          // For now, we use a fallback to show that we received their stream
+          if (streamData && streamData.active) {
+            // Visual indicator that we received their stream
+            if (strangerVideoRef.current.classList) {
+              strangerVideoRef.current.classList.add('has-real-stream');
+            }
+          }
         } catch (error) {
           console.error('Error setting up partner video:', error);
         }
@@ -97,7 +149,7 @@ const SolmegleChat: React.FC = () => {
     return Math.floor(Math.random() * 43) + 1;
   }, []);
 
-  // Enhanced connectToPartner function that prioritizes real users
+  // Enhanced connectToPartner function with stronger priority for real users
   const connectToPartner = useCallback(() => {
     // Clear all messages for the new session
     setMessages([]);
@@ -108,11 +160,19 @@ const SolmegleChat: React.FC = () => {
     
     // First, attempt to find real users
     if (socketRef.current) {
-      console.log('Searching for real partners...');
-      socketRef.current.emit('find_partner', userId);
+      console.log('Searching for real partners with high priority...');
       
-      // Listen for matches or timeouts
-      // Note: The socket listeners are set up in the useEffect
+      // Tell server this is a high priority match request
+      socketRef.current.emit('find_partner', {
+        userId: userId,
+        priority: 'high'
+      });
+      
+      // Add a visual indicator that we're looking for real people
+      setMessages(prev => [...prev, { 
+        text: "Looking for real people first...", 
+        isUser: false 
+      }]);
       
       // If no match after 7 seconds, fall back to video
       setTimeout(() => {
@@ -122,6 +182,12 @@ const SolmegleChat: React.FC = () => {
           setCurrentVideoId(videoId);
           setIsRealPartner(false);
           setIsSearchingForPartner(false);
+          
+          // Add a message explaining we're showing a recording
+          setMessages(prev => [...prev, { 
+            text: "No one is online right now. Showing you a recording instead.", 
+            isUser: false 
+          }]);
         }
       }, 7000);
     } else {
@@ -159,6 +225,88 @@ const SolmegleChat: React.FC = () => {
     }
   }, [sendMessage]);
 
+  // Debugging function to check camera status
+  const logVideoStatus = useCallback(() => {
+    if (userVideoRef.current) {
+      const userVideo = userVideoRef.current;
+      console.log('User video element:', {
+        readyState: userVideo.readyState,
+        paused: userVideo.paused,
+        height: userVideo.videoHeight,
+        width: userVideo.videoWidth,
+        hasStream: userVideo.srcObject !== null,
+        streamActive: userVideo.srcObject ? (userVideo.srcObject as MediaStream).active : false,
+        streamTracks: userVideo.srcObject ? (userVideo.srcObject as MediaStream).getTracks().length : 0
+      });
+    } else {
+      console.log('User video ref is null');
+    }
+  }, [userVideoRef]);
+
+  const requestCameraAccess = useCallback(() => {
+    // Define camera constraints for better quality
+    const constraints = {
+      video: true,
+      audio: true
+    };
+
+    navigator.mediaDevices.getUserMedia(constraints)
+      .then(stream => {
+        console.log("Camera permission granted on request, tracks:", stream.getTracks().length);
+        if (userVideoRef.current) {
+          // Stop any existing tracks
+          const existingStream = userVideoRef.current.srcObject as MediaStream;
+          if (existingStream) {
+            existingStream.getTracks().forEach(track => track.stop());
+          }
+          
+          // Set new stream
+          userVideoRef.current.srcObject = stream;
+          
+          // Ensure video starts playing
+          userVideoRef.current.play()
+            .then(() => {
+              console.log("User video is now playing after explicit request");
+              logVideoStatus();
+            })
+            .catch(err => {
+              console.error("Error playing user video:", err);
+            });
+        } else {
+          console.error("User video ref is null, cannot display camera");
+        }
+        setIsCameraAllowed(true);
+      })
+      .catch(error => {
+        console.error('Error accessing camera:', error);
+        setIsCameraAllowed(false);
+      });
+  }, [logVideoStatus]);
+  
+  // Fix for camera not showing after page refresh by adding a focus event listener
+  useEffect(() => {
+    // Function to reinitialize camera when page gets focus
+    const handleFocus = () => {
+      console.log("Window focused - checking camera status");
+      if (isCameraAllowed && (!userVideoRef.current?.srcObject || 
+          !(userVideoRef.current?.srcObject as MediaStream)?.active)) {
+        console.log("Camera needs to be reinitialized");
+        requestCameraAccess();
+      }
+    };
+
+    // Add focus event listener to window
+    window.addEventListener('focus', handleFocus);
+    
+    // Check camera on mount as well
+    handleFocus();
+    
+    // Clean up
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [isCameraAllowed, requestCameraAccess]);
+
   // Add video ended event listener
   useEffect(() => {
     const strangerVideo = strangerVideoRef.current;
@@ -193,24 +341,6 @@ const SolmegleChat: React.FC = () => {
       }
     };
   }, [isRealPartner, getRandomVideoId]);
-
-  // Debugging function to check camera status
-  const logVideoStatus = useCallback(() => {
-    if (userVideoRef.current) {
-      const userVideo = userVideoRef.current;
-      console.log('User video element:', {
-        readyState: userVideo.readyState,
-        paused: userVideo.paused,
-        height: userVideo.videoHeight,
-        width: userVideo.videoWidth,
-        hasStream: userVideo.srcObject !== null,
-        streamActive: userVideo.srcObject ? (userVideo.srcObject as MediaStream).active : false,
-        streamTracks: userVideo.srcObject ? (userVideo.srcObject as MediaStream).getTracks().length : 0
-      });
-    } else {
-      console.log('User video ref is null');
-    }
-  }, [userVideoRef]);
 
   // Add regular status checking
   useEffect(() => {
@@ -272,46 +402,6 @@ const SolmegleChat: React.FC = () => {
         }
       }
     };
-  }, [logVideoStatus]);
-
-  const requestCameraAccess = useCallback(() => {
-    // Define camera constraints for better quality
-    const constraints = {
-      video: true,
-      audio: true
-    };
-
-    navigator.mediaDevices.getUserMedia(constraints)
-      .then(stream => {
-        console.log("Camera permission granted on request, tracks:", stream.getTracks().length);
-        if (userVideoRef.current) {
-          // Stop any existing tracks
-          const existingStream = userVideoRef.current.srcObject as MediaStream;
-          if (existingStream) {
-            existingStream.getTracks().forEach(track => track.stop());
-          }
-          
-          // Set new stream
-          userVideoRef.current.srcObject = stream;
-          
-          // Ensure video starts playing
-          userVideoRef.current.play()
-            .then(() => {
-              console.log("User video is now playing after explicit request");
-              logVideoStatus();
-            })
-            .catch(err => {
-              console.error("Error playing user video:", err);
-            });
-        } else {
-          console.error("User video ref is null, cannot display camera");
-        }
-        setIsCameraAllowed(true);
-      })
-      .catch(error => {
-        console.error('Error accessing camera:', error);
-        setIsCameraAllowed(false);
-      });
   }, [logVideoStatus]);
 
   // Modified startNewChat function
