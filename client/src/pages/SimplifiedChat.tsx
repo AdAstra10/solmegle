@@ -10,8 +10,11 @@ const TOTAL_VIDEOS = 43;
 const rtcConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
-  ]
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' }
+  ],
+  iceCandidatePoolSize: 10
 };
 
 const SolmegleChat: React.FC = () => {
@@ -24,122 +27,108 @@ const SolmegleChat: React.FC = () => {
   const userVideoRef = useRef<HTMLVideoElement>(null);
   const strangerVideoRef = useRef<HTMLVideoElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
-  // Add socket reference
   const socketRef = useRef<Socket | null>(null);
   const [waitingUsers, setWaitingUsers] = useState<number>(0);
   const [userId, setUserId] = useState<string>('');
-  // Add WebRTC references
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const userStreamRef = useRef<MediaStream | null>(null);
 
-  // Initialize socket connection
-  useEffect(() => {
-    // Create socket connection
-    const socket = io(window.location.origin);
-    socketRef.current = socket;
-
-    // Generate unique user ID if not already set
-    if (!userId) {
-      const newUserId = 'user_' + Math.random().toString(36).substr(2, 9);
-      setUserId(newUserId);
+  // WebRTC helper functions
+  const cleanupPeerConnection = useCallback(() => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.ontrack = null;
+      peerConnectionRef.current.onicecandidate = null;
+      peerConnectionRef.current.onconnectionstatechange = null;
+      
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+      
+      // Clear the stranger video
+      if (strangerVideoRef.current) {
+        strangerVideoRef.current.srcObject = null;
+      }
+      
+      console.log('WebRTC peer connection cleaned up');
     }
+  }, []);
 
-    // Socket event listeners
-    socket.on('connect', () => {
-      console.log('Connected to server');
-    });
-
-    socket.on('waiting_count', (count: number) => {
-      setWaitingUsers(count);
-      console.log(`Users waiting for match: ${count}`);
-    });
-
-    socket.on('matched', (partnerId: string) => {
-      console.log(`Matched with user: ${partnerId}`);
-      setIsSearchingForPartner(false);
-      setIsRealPartner(true);
-      setMessages([]);
+  const createPeerConnection = useCallback((partnerId: string, isInitiator: boolean) => {
+    try {
+      console.log(`Creating peer connection with ${partnerId}, initiator: ${isInitiator}`);
       
-      // Create WebRTC peer connection for the matched partner
-      createPeerConnection(partnerId, true); // true = we are the initiator
-    });
-    
-    // WebRTC signaling
-    socket.on('webrtc_offer', async (data: any) => {
-      if (!peerConnectionRef.current) {
-        createPeerConnection(data.from, false); // false = we are not the initiator
-      }
+      // Cleanup any existing connections
+      cleanupPeerConnection();
       
-      try {
-        await peerConnectionRef.current?.setRemoteDescription(
-          new RTCSessionDescription(data.offer)
-        );
-        
-        // Create answer
-        const answer = await peerConnectionRef.current?.createAnswer();
-        await peerConnectionRef.current?.setLocalDescription(answer);
-        
-        // Send answer back
-        socket.emit('webrtc_answer', {
-          answer,
-          to: data.from,
-          from: userId
+      // Create new peer connection
+      const pc = new RTCPeerConnection(rtcConfig);
+      peerConnectionRef.current = pc;
+      
+      // Add our stream to the connection
+      if (userStreamRef.current) {
+        userStreamRef.current.getTracks().forEach(track => {
+          pc.addTrack(track, userStreamRef.current!);
         });
-      } catch (error) {
-        console.error('Error handling WebRTC offer:', error);
+      } else {
+        console.error("No local stream to add to peer connection");
       }
-    });
-    
-    socket.on('webrtc_answer', async (data: any) => {
-      try {
-        await peerConnectionRef.current?.setRemoteDescription(
-          new RTCSessionDescription(data.answer)
-        );
-        console.log('Successfully set remote description from answer');
-      } catch (error) {
-        console.error('Error handling WebRTC answer:', error);
-      }
-    });
-    
-    socket.on('webrtc_ice_candidate', async (data: any) => {
-      try {
-        if (data.candidate) {
-          await peerConnectionRef.current?.addIceCandidate(
-            new RTCIceCandidate(data.candidate)
-          );
-          console.log('Added ICE candidate from partner');
+      
+      // Handle ICE candidates
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          if (socketRef.current) {
+            socketRef.current.emit('webrtc_ice_candidate', {
+              candidate: event.candidate,
+              to: partnerId,
+              from: userId
+            });
+          }
         }
-      } catch (error) {
-        console.error('Error handling ICE candidate:', error);
+      };
+      
+      // Handle connection state changes
+      pc.onconnectionstatechange = () => {
+        console.log(`Connection state changed to: ${pc.connectionState}`);
+        if (pc.connectionState === 'connected') {
+          console.log('Peers successfully connected!');
+          setIsRealPartner(true);
+        }
+      };
+      
+      // Handle receiving remote stream
+      pc.ontrack = (event) => {
+        console.log('Received remote track!', event.streams[0]);
+        if (strangerVideoRef.current && event.streams[0]) {
+          strangerVideoRef.current.srcObject = event.streams[0];
+          setIsRealPartner(true);
+          console.log('Set stranger video source to remote stream');
+        }
+      };
+      
+      // If we're the initiator, create and send an offer
+      if (isInitiator) {
+        pc.createOffer()
+          .then(offer => pc.setLocalDescription(offer))
+          .then(() => {
+            if (socketRef.current) {
+              socketRef.current.emit('webrtc_offer', {
+                offer: pc.localDescription,
+                to: partnerId,
+                from: userId
+              });
+            }
+          })
+          .catch(err => console.error('Error creating offer:', err));
       }
-    });
-
-    socket.on('user_message', (message: string) => {
-      setMessages(prev => [...prev, { text: message, isUser: false }]);
-    });
-
-    socket.on('partner_disconnected', () => {
-      console.log('Partner disconnected');
-      setIsRealPartner(false);
       
-      // Cleanup WebRTC on disconnect
-      cleanupPeerConnection();
-      
-      // Automatically look for a new partner
-      setTimeout(() => {
-        connectToPartner();
-      }, 3000);
-    });
-
-    return () => {
-      cleanupPeerConnection();
-      socket.disconnect();
-    };
-  }, [userId]);
+      return pc;
+    } catch (error) {
+      console.error('Error creating peer connection:', error);
+      return null;
+    }
+  }, [userId, cleanupPeerConnection]);
 
   // Function to get a random video ID
   const getRandomVideoId = useCallback(() => {
-    // Generate a random number between 1 and 43 (assuming we have 43 videos)
     return Math.floor(Math.random() * 43) + 1;
   }, []);
 
@@ -181,6 +170,104 @@ const SolmegleChat: React.FC = () => {
       setIsSearchingForPartner(false);
     }
   }, [getRandomVideoId, userId, isRealPartner, isSearchingForPartner]);
+
+  // Initialize socket connection
+  useEffect(() => {
+    const socket = io(window.location.origin, {
+      transports: ['websocket'],
+      upgrade: false
+    });
+    socketRef.current = socket;
+
+    if (!userId) {
+      const newUserId = 'user_' + Math.random().toString(36).substr(2, 9);
+      setUserId(newUserId);
+    }
+
+    socket.on('connect', () => {
+      console.log('Connected to server');
+    });
+
+    socket.on('waiting_count', (count: number) => {
+      setWaitingUsers(count);
+      console.log(`Users waiting for match: ${count}`);
+    });
+
+    socket.on('matched', (partnerId: string) => {
+      console.log(`Matched with user: ${partnerId}`);
+      setIsSearchingForPartner(false);
+      setIsRealPartner(true);
+      setMessages([]);
+      
+      // Create WebRTC peer connection for the matched partner
+      createPeerConnection(partnerId, true);
+    });
+    
+    socket.on('webrtc_offer', async (data: any) => {
+      if (!peerConnectionRef.current) {
+        createPeerConnection(data.from, false);
+      }
+      
+      try {
+        await peerConnectionRef.current?.setRemoteDescription(
+          new RTCSessionDescription(data.offer)
+        );
+        
+        const answer = await peerConnectionRef.current?.createAnswer();
+        await peerConnectionRef.current?.setLocalDescription(answer);
+        
+        socket.emit('webrtc_answer', {
+          answer,
+          to: data.from,
+          from: userId
+        });
+      } catch (error) {
+        console.error('Error handling WebRTC offer:', error);
+      }
+    });
+    
+    socket.on('webrtc_answer', async (data: any) => {
+      try {
+        await peerConnectionRef.current?.setRemoteDescription(
+          new RTCSessionDescription(data.answer)
+        );
+        console.log('Successfully set remote description from answer');
+      } catch (error) {
+        console.error('Error handling WebRTC answer:', error);
+      }
+    });
+    
+    socket.on('webrtc_ice_candidate', async (data: any) => {
+      try {
+        if (data.candidate) {
+          await peerConnectionRef.current?.addIceCandidate(
+            new RTCIceCandidate(data.candidate)
+          );
+          console.log('Added ICE candidate from partner');
+        }
+      } catch (error) {
+        console.error('Error handling ICE candidate:', error);
+      }
+    });
+
+    socket.on('user_message', (message: string) => {
+      setMessages(prev => [...prev, { text: message, isUser: false }]);
+    });
+
+    socket.on('partner_disconnected', () => {
+      console.log('Partner disconnected');
+      setIsRealPartner(false);
+      cleanupPeerConnection();
+      setTimeout(() => {
+        connectToPartner();
+      }, 3000);
+    });
+
+    return () => {
+      cleanupPeerConnection();
+      socket.disconnect();
+    };
+  }, [userId, createPeerConnection, connectToPartner, cleanupPeerConnection]);
 
   // Function to send a message to the partner
   const sendMessage = useCallback(() => {
@@ -425,99 +512,6 @@ const SolmegleChat: React.FC = () => {
       chatContainerRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages]);
-
-  // WebRTC helper functions
-  const createPeerConnection = useCallback((partnerId: string, isInitiator: boolean) => {
-    try {
-      console.log(`Creating peer connection with ${partnerId}, initiator: ${isInitiator}`);
-      
-      // Cleanup any existing connections
-      cleanupPeerConnection();
-      
-      // Create new peer connection
-      const pc = new RTCPeerConnection(rtcConfig);
-      peerConnectionRef.current = pc;
-      
-      // Add our stream to the connection
-      if (userStreamRef.current) {
-        userStreamRef.current.getTracks().forEach(track => {
-          pc.addTrack(track, userStreamRef.current!);
-        });
-      } else {
-        console.error("No local stream to add to peer connection");
-      }
-      
-      // Handle ICE candidates
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          if (socketRef.current) {
-            socketRef.current.emit('webrtc_ice_candidate', {
-              candidate: event.candidate,
-              to: partnerId,
-              from: userId
-            });
-          }
-        }
-      };
-      
-      // Handle connection state changes
-      pc.onconnectionstatechange = () => {
-        console.log(`Connection state changed to: ${pc.connectionState}`);
-        if (pc.connectionState === 'connected') {
-          console.log('Peers successfully connected!');
-        }
-      };
-      
-      // Handle receiving remote stream
-      pc.ontrack = (event) => {
-        console.log('Received remote track!', event.streams[0]);
-        if (strangerVideoRef.current && event.streams[0]) {
-          strangerVideoRef.current.srcObject = event.streams[0];
-          setIsRealPartner(true);
-          console.log('Set stranger video source to remote stream');
-        }
-      };
-      
-      // If we're the initiator, create and send an offer
-      if (isInitiator) {
-        pc.createOffer()
-          .then(offer => pc.setLocalDescription(offer))
-          .then(() => {
-            if (socketRef.current) {
-              socketRef.current.emit('webrtc_offer', {
-                offer: pc.localDescription,
-                to: partnerId,
-                from: userId
-              });
-            }
-          })
-          .catch(err => console.error('Error creating offer:', err));
-      }
-      
-      return pc;
-    } catch (error) {
-      console.error('Error creating peer connection:', error);
-      return null;
-    }
-  }, [userId]);
-  
-  const cleanupPeerConnection = useCallback(() => {
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.ontrack = null;
-      peerConnectionRef.current.onicecandidate = null;
-      peerConnectionRef.current.onconnectionstatechange = null;
-      
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
-      
-      // Clear the stranger video
-      if (strangerVideoRef.current) {
-        strangerVideoRef.current.srcObject = null;
-      }
-      
-      console.log('WebRTC peer connection cleaned up');
-    }
-  }, []);
 
   return (
     <>

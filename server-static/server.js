@@ -5,9 +5,15 @@ const socketIo = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server);
+const io = socketIo(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
 
-const PORT = process.env.PORT || 3000;
+// Use environment variable for port with fallback
+const PORT = process.env.PORT || 10000;
 
 // Serve static files
 app.use(express.static(path.join(__dirname)));
@@ -194,6 +200,7 @@ function getSocketByUserId(userId) {
   return null;
 }
 
+// Start server
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 }); 
