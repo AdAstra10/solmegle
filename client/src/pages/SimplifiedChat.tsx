@@ -7,14 +7,18 @@ import io, { Socket } from 'socket.io-client';
 const TOTAL_VIDEOS = 43;
 
 // Configuration for WebRTC
-const rtcConfig = {
+const rtcConfig: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' }
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:stun5.l.google.com:19302' }
   ],
-  iceCandidatePoolSize: 10
+  iceCandidatePoolSize: 10,
+  bundlePolicy: 'max-bundle' as RTCBundlePolicy,
+  rtcpMuxPolicy: 'require' as RTCRtcpMuxPolicy
 };
 
 const SolmegleChat: React.FC = () => {
@@ -101,12 +105,17 @@ const SolmegleChat: React.FC = () => {
           strangerVideoRef.current.srcObject = event.streams[0];
           setIsRealPartner(true);
           console.log('Set stranger video source to remote stream');
+          
+          // Ensure the video plays
+          strangerVideoRef.current.play()
+            .then(() => console.log('Remote video started playing'))
+            .catch(err => console.error('Error playing remote video:', err));
         }
       };
       
       // If we're the initiator, create and send an offer
       if (isInitiator) {
-        pc.createOffer()
+        pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
           .then(offer => pc.setLocalDescription(offer))
           .then(() => {
             if (socketRef.current) {
