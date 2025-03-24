@@ -5,24 +5,55 @@ services:
     region: oregon
     plan: free
     buildCommand: |
-      # Clean package-lock.json and node_modules
-      rm -rf package-lock.json client/package-lock.json server/package-lock.json
+      # Clean package-lock.json, yarn.lock and node_modules
+      rm -rf package-lock.json client/package-lock.json server/package-lock.json yarn.lock
       rm -rf node_modules client/node_modules server/node_modules
+      
+      # Set NPM config to use exact package versions and skip optional deps
+      npm config set save-exact=true
+      npm config set optional=false
+      
       # Install and build client
       cd client 
-      npm install
+      npm install --no-optional
       npm run build
+      
       # Copy client build to server public
       mkdir -p ../server/public
       cp -r build/* ../server/public/
+      
+      # Create a fallback static directory at project root
+      mkdir -p static_fallback
+      cp -r client/build/* static_fallback/
+      
       # Install and build server
       cd ../server
-      npm install
+      # Make sure bcrypt is not installed
+      echo "Installing server dependencies without bcrypt"
+      npm install --no-optional
+      npm uninstall bcrypt || true
+      # Ensure bcryptjs is installed
+      npm install bcryptjs --save
       npm run build
+      
+      # Print installed packages to verify
+      echo "Listing server node_modules:"
+      ls -la node_modules | grep bcrypt
     startCommand: cd server && node dist/index.js
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 8080
-    healthCheckPath: /health 
+    healthCheckPath: /health
+    
+  # Static site as a fallback
+  - type: web
+    name: solmegle-static
+    env: static
+    buildCommand: mkdir -p dist && cp -r static_fallback/* dist/
+    staticPublishPath: ./dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html 
