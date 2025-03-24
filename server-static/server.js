@@ -43,14 +43,14 @@ io.on('connection', (socket) => {
   // Find partner function with priority matching
   socket.on('find_partner', (data) => {
     let userId;
-    let priority = 'normal';
+    let priority = 'high'; // Default to high priority to favor real connections
     
     // Handle different formats of data (string or object)
     if (typeof data === 'string') {
       userId = data;
     } else if (typeof data === 'object' && data !== null) {
       userId = data.userId || socket.id;
-      priority = data.priority || 'normal';
+      priority = data.priority || 'high';
     } else {
       userId = socket.id;
     }
@@ -78,22 +78,15 @@ io.on('connection', (socket) => {
     
     // Find an available partner with prioritization
     if (waitingUsers.size > 0) {
-      // Sort waiting users by priority (high first) and then by time (oldest first)
+      // Sort waiting users by time (oldest first) to be fair
       const sortedWaitingUsers = Array.from(waitingUsers.entries())
-        .sort((a, b) => {
-          // First compare by priority
-          if (a[1].priority === 'high' && b[1].priority !== 'high') return -1;
-          if (a[1].priority !== 'high' && b[1].priority === 'high') return 1;
-          
-          // Then compare by timestamp (oldest first)
-          return a[1].timestamp - b[1].timestamp;
-        });
+        .sort((a, b) => a[1].timestamp - b[1].timestamp);
       
-      // Get the best match based on priority
+      // Get the best match based on waiting time
       const [partnerId, partnerData] = sortedWaitingUsers[0];
       const partnerSocket = partnerData.socket;
       
-      console.log(`Matching ${userId} with waiting user ${partnerId} (priority: ${partnerData.priority})`);
+      console.log(`Matching ${userId} with waiting user ${partnerId} (waited: ${Date.now() - partnerData.timestamp}ms)`);
       
       // Remove partner from waiting list
       waitingUsers.delete(partnerId);

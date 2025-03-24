@@ -181,9 +181,9 @@ const SolmegleChat: React.FC = () => {
     setCurrentVideoId(null);
     
     // First, attempt to find real users
-    if (socketRef.current) {
-      console.log('Searching for real partners with high priority...');
-      setConnectionStatus('searching for partners');
+    if (socketRef.current && socketRef.current.connected) {
+      console.log('Automatically searching for real partners...');
+      setConnectionStatus('actively searching for partners');
       
       // Make sure userId is a string, not an object
       if (!userId) {
@@ -197,21 +197,36 @@ const SolmegleChat: React.FC = () => {
         socketRef.current.emit('find_partner', userId);
       }
       
-      // If no match after 10 seconds, fall back to video
+      // Keep checking for partners more aggressively
+      const checkInterval = setInterval(() => {
+        if (isSearchingForPartner && !isRealPartner && socketRef.current && socketRef.current.connected) {
+          console.log('Still searching for partners, sending another find request');
+          socketRef.current.emit('find_partner', userId);
+        } else {
+          clearInterval(checkInterval);
+        }
+      }, 5000); // Check every 5 seconds
+      
+      // If no match after 15 seconds, fall back to video
       setTimeout(() => {
+        clearInterval(checkInterval);
         if (isSearchingForPartner && !isRealPartner) {
           console.log('No real partners found within timeout, falling back to video');
-          setConnectionStatus('no partners found');
+          setConnectionStatus('no partners found, using video fallback');
           const videoId = getRandomVideoId();
           setCurrentVideoId(videoId);
           setIsRealPartner(false);
           setIsSearchingForPartner(false);
         }
-      }, 10000);
+      }, 15000); // Extended timeout for finding real partners
+      
+      return () => {
+        clearInterval(checkInterval); // Clean up interval on component unmount
+      };
     } else {
       // Socket not connected, fall back to video immediately
       console.log('Socket not connected, falling back to video');
-      setConnectionStatus('not connected to server');
+      setConnectionStatus('not connected to server, using video fallback');
       const videoId = getRandomVideoId();
       setCurrentVideoId(videoId);
       setIsRealPartner(false);
@@ -715,6 +730,13 @@ const SolmegleChat: React.FC = () => {
     const timer = setTimeout(() => {
       if (mounted) {
         requestCameraAccess()
+          .then(() => {
+            // Automatically connect to a partner as soon as camera is allowed
+            if (mounted) {
+              console.log("Camera access granted, automatically connecting to partner");
+              connectToPartner();
+            }
+          })
           .catch(error => {
             console.error('Initial camera setup failed:', error);
           });
@@ -740,7 +762,7 @@ const SolmegleChat: React.FC = () => {
         clearTimeout(retryTimeoutRef.current);
       }
     };
-  }, [requestCameraAccess]);
+  }, [requestCameraAccess, connectToPartner]);
 
   // Additional effect to handle camera stream when refs become available
   useEffect(() => {
