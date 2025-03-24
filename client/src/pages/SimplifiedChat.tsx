@@ -544,7 +544,8 @@ const SolmegleChat: React.FC = () => {
         
         // Send the answer back after a slight delay to ensure local description is set
         setTimeout(() => {
-          if (socket.connected && pc.localDescription) {
+          // Check that pc and socket are still valid
+          if (socket.connected && pc && pc.localDescription) {
             console.log('Sending answer back to:', data.from);
             socket.emit('webrtc_answer', {
               answer: pc.localDescription,
