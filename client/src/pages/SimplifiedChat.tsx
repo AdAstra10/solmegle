@@ -174,12 +174,34 @@ const SolmegleChat: React.FC = () => {
 
   // Request camera access as soon as the component mounts
   useEffect(() => {
+    // Define camera constraints for better quality
+    const constraints = {
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        facingMode: "user"
+      },
+      audio: true
+    };
+
     // Check if we already have camera access
-    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+    navigator.mediaDevices.getUserMedia(constraints)
       .then(stream => {
         console.log("Camera permission granted");
         if (userVideoRef.current) {
+          // Stop any existing tracks
+          const existingStream = userVideoRef.current.srcObject as MediaStream;
+          if (existingStream) {
+            existingStream.getTracks().forEach(track => track.stop());
+          }
+          
+          // Set new stream
           userVideoRef.current.srcObject = stream;
+          
+          // Ensure video starts playing
+          userVideoRef.current.play().catch(err => {
+            console.error("Error playing user video:", err);
+          });
         }
         setIsCameraAllowed(true);
       })
@@ -187,13 +209,46 @@ const SolmegleChat: React.FC = () => {
         console.error('Camera access error:', error);
         setIsCameraAllowed(false);
       });
+      
+    // Cleanup function to stop all tracks when component unmounts
+    return () => {
+      if (userVideoRef.current && userVideoRef.current.srcObject) {
+        const stream = userVideoRef.current.srcObject as MediaStream;
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
+      }
+    };
   }, []);
 
   const requestCameraAccess = useCallback(() => {
-    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+    // Define camera constraints for better quality
+    const constraints = {
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        facingMode: "user"
+      },
+      audio: true
+    };
+
+    navigator.mediaDevices.getUserMedia(constraints)
       .then(stream => {
+        console.log("Camera permission granted on request");
         if (userVideoRef.current) {
+          // Stop any existing tracks
+          const existingStream = userVideoRef.current.srcObject as MediaStream;
+          if (existingStream) {
+            existingStream.getTracks().forEach(track => track.stop());
+          }
+          
+          // Set new stream
           userVideoRef.current.srcObject = stream;
+          
+          // Ensure video starts playing
+          userVideoRef.current.play().catch(err => {
+            console.error("Error playing user video:", err);
+          });
         }
         setIsCameraAllowed(true);
       })
@@ -201,7 +256,7 @@ const SolmegleChat: React.FC = () => {
         console.error('Error accessing camera:', error);
         setIsCameraAllowed(false);
       });
-  }, [userVideoRef]);
+  }, []);
 
   // Modified startNewChat function
   const startNewChat = useCallback(() => {
@@ -282,7 +337,10 @@ const SolmegleChat: React.FC = () => {
             <VideoScreen>
               {/* User's video */}
               {isCameraAllowed ? (
-                <video ref={userVideoRef} autoPlay muted playsInline />
+                <VideoContainer>
+                  <UserVideo ref={userVideoRef} autoPlay muted playsInline />
+                  <UserWatermark>You</UserWatermark>
+                </VideoContainer>
               ) : (
                 <CameraBlockedSection>
                   <CameraBlockedMessage>
@@ -543,6 +601,52 @@ const StrangerVideo = styled.video`
   &::-webkit-media-controls-enclosure {
     display: none !important;
   }
+`;
+
+// Add this new styled component for user's video after the StrangerVideo component
+const UserVideo = styled.video`
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background-color: #000;
+  max-height: 100%;
+  max-width: 100%;
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  border: 2px solid #09f; /* Add a border to highlight that this is the user's video */
+  box-sizing: border-box;
+  
+  /* Hide controls completely */
+  &::-webkit-media-controls-panel,
+  &::-webkit-media-controls-play-button,
+  &::-webkit-media-controls-start-playback-button {
+    display: none !important;
+    -webkit-appearance: none !important;
+  }
+  
+  /* Additional control hiding */
+  &::-webkit-media-controls {
+    display: none !important;
+  }
+  
+  &::-webkit-media-controls-enclosure {
+    display: none !important;
+  }
+`;
+
+const UserWatermark = styled.div`
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  color: #ff6600;
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-family: Arial, sans-serif;
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+  z-index: 10;
 `;
 
 export default SolmegleChat;
