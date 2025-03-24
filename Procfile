@@ -1,1 +1,0 @@
-web: cd server-static && node server.js 
