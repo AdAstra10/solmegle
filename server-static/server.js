@@ -43,6 +43,10 @@ io.on('connection', (socket) => {
     io.emit('waiting_count', count);
   };
   
+  // Log active users and connections for debugging
+  console.log(`Current active connections: ${activeConnections.size / 2} pairs`);
+  console.log(`Current waiting users: ${waitingUsers.size}`);
+  
   // Find partner function with priority matching
   socket.on('find_partner', (data) => {
     let userId;
@@ -104,6 +108,15 @@ io.on('connection', (socket) => {
       const waitTime = Date.now() - partnerData.timestamp;
       console.log(`Matching ${userId} with waiting user ${partnerId} (waited: ${waitTime}ms)`);
       
+      // Check if partner socket is still valid
+      if (!partnerSocket || !partnerSocket.connected) {
+        console.log(`Partner socket ${partnerId} is no longer valid or connected - removing from waiting list`);
+        waitingUsers.delete(partnerId);
+        // Try again with another user
+        socket.emit('find_partner', userId);
+        return;
+      }
+      
       // Remove partner from waiting list
       waitingUsers.delete(partnerId);
       
@@ -147,10 +160,25 @@ io.on('connection', (socket) => {
     // Forward the offer to the target user
     const targetSocket = getSocketByUserId(data.to);
     if (targetSocket) {
-      targetSocket.emit('webrtc_offer', data);
-      console.log(`Forwarded WebRTC offer to ${data.to}`);
+      // Verify the connection is active
+      if (activeConnections.has(data.from) && activeConnections.get(data.from) === data.to) {
+        targetSocket.emit('webrtc_offer', data);
+        console.log(`Forwarded WebRTC offer to ${data.to}`);
+      } else {
+        console.log(`Connection between ${data.from} and ${data.to} is not active - creating connection first`);
+        // Create the connection before forwarding the offer
+        activeConnections.set(data.from, data.to);
+        activeConnections.set(data.to, data.from);
+        // Notify both users about the match
+        socket.emit('matched', data.to);
+        targetSocket.emit('matched', data.from);
+        // Now forward the offer
+        targetSocket.emit('webrtc_offer', data);
+      }
     } else {
       console.log(`Target user ${data.to} not found for WebRTC offer`);
+      // Notify sender that target is not available
+      socket.emit('partner_disconnected');
     }
   });
   
@@ -172,6 +200,8 @@ io.on('connection', (socket) => {
       });
     } else {
       console.log(`Target user ${data.to} not found for WebRTC answer`);
+      // Notify sender that target is not available
+      socket.emit('partner_disconnected');
     }
   });
   
@@ -180,6 +210,7 @@ io.on('connection', (socket) => {
     const targetSocket = getSocketByUserId(data.to);
     if (targetSocket) {
       targetSocket.emit('webrtc_ice_candidate', data);
+      console.log(`ICE candidate forwarded from ${data.from} to ${data.to}`);
     } else {
       console.log(`Target user ${data.to} not found for ICE candidate`);
     }
@@ -196,6 +227,8 @@ io.on('connection', (socket) => {
       return;
     }
     
+    console.log(`Message from ${socket.userId} to ${to}: ${message.substring(0, 20)}...`);
+    
     // Get the partner ID from the active connections
     if (activeConnections.has(to)) {
       const partnerId = activeConnections.get(to);
@@ -206,9 +239,11 @@ io.on('connection', (socket) => {
         console.log(`Message forwarded from ${to} to ${partnerId}`);
       } else {
         console.log(`Partner socket not found for ${partnerId}`);
+        socket.emit('partner_disconnected');
       }
     } else {
       console.log(`No active connection found for ${to}`);
+      socket.emit('partner_disconnected');
     }
   });
   
