@@ -239,6 +239,7 @@ const SolmegleChat: React.FC = () => {
         setPartnerId(matchedPartnerId);
         setIsRealPartner(true);
         setIsActiveConnection(true);
+        setIsConnecting(false); // Reset connecting status
 
         // Since we found a real partner, clear any timeout for video fallback
         if (partnerConnectionTimeout.current) {
@@ -246,10 +247,17 @@ const SolmegleChat: React.FC = () => {
           partnerConnectionTimeout.current = null;
         }
 
-        // Start WebRTC process when we get a match
-        if (userStreamRef.current && socketRef.current) {
-          // We'll implement the actual connection in a different effect to avoid circular references
-          console.log("Ready to create WebRTC connection with", matchedPartnerId);
+        // Immediately start WebRTC connection with this partner
+        if (userStreamRef.current) {
+          console.log("Starting WebRTC connection with partner immediately");
+          createPeerConnection(matchedPartnerId, true);
+        } else {
+          console.error("No local stream available for connection");
+          requestCameraAccess().then(() => {
+            if (userStreamRef.current) {
+              createPeerConnection(matchedPartnerId, true);
+            }
+          });
         }
       });
 
@@ -463,6 +471,14 @@ const SolmegleChat: React.FC = () => {
       const stream = userStreamRef.current;
       console.log(`Adding local stream with ${stream.getTracks().length} tracks to peer connection`);
       
+      // CRITICAL FIX: Make sure camera is enabled and unmuted before adding to peer connection
+      stream.getTracks().forEach(track => {
+        track.enabled = true;
+        if (track.kind === 'audio') {
+          console.log(`Ensuring audio track is enabled: ${track.id}`);
+        }
+      });
+      
       // Add each track from the stream to the peer connection
       stream.getTracks().forEach(track => {
         try {
@@ -496,10 +512,11 @@ const SolmegleChat: React.FC = () => {
         lastIceCandidateTimeRef.current = Date.now(); // Update the timestamp
         
         if (socketRef.current && socketRef.current.connected) {
+          // CRITICAL FIX: Make sure ICE candidates are sent with proper fields to match server expectations
           socketRef.current.emit('webrtc_ice_candidate', {
             candidate: event.candidate,
             to: targetUserId,
-            from: userId
+            from: userId || socketRef.current.id
           });
         } else {
           console.warn("Socket not connected when trying to send ICE candidate");
@@ -547,6 +564,13 @@ const SolmegleChat: React.FC = () => {
         
         if (strangerVideoRef.current) {
           console.log('Setting remote stream to stranger video element');
+          
+          // IMPORTANT: Ensure any previous stream is cleaned up
+          if (strangerVideoRef.current.srcObject) {
+            const oldStream = strangerVideoRef.current.srcObject as MediaStream;
+            oldStream.getTracks().forEach(track => track.stop());
+          }
+          
           strangerVideoRef.current.srcObject = event.streams[0];
           setIsRealPartner(true);
           
@@ -554,6 +578,9 @@ const SolmegleChat: React.FC = () => {
           strangerVideoRef.current.onloadedmetadata = () => {
             console.log('Remote video metadata loaded, dimensions:', 
               strangerVideoRef.current?.videoWidth, 'x', strangerVideoRef.current?.videoHeight);
+            
+            // CRITICAL FIX: Make sure remote video is NOT muted for real partner
+            strangerVideoRef.current!.muted = false;
             
             strangerVideoRef.current!.play()
               .then(() => console.log('Remote video playing'))
@@ -563,7 +590,17 @@ const SolmegleChat: React.FC = () => {
                 if (err.name === 'NotAllowedError') {
                   console.log('Autoplay blocked, trying with muted');
                   strangerVideoRef.current!.muted = true;
-                  return strangerVideoRef.current!.play();
+                  return strangerVideoRef.current!.play().then(() => {
+                    console.log('Remote video playing in muted state due to autoplay restrictions');
+                    // Try to unmute after user interaction
+                    document.addEventListener('click', function unmute() {
+                      if (strangerVideoRef.current) {
+                        strangerVideoRef.current.muted = false;
+                        console.log('Unmuted video after user interaction');
+                      }
+                      document.removeEventListener('click', unmute);
+                    }, { once: true });
+                  });
                 }
                 throw err;
               })
@@ -623,7 +660,7 @@ const SolmegleChat: React.FC = () => {
           socketRef.current.emit('webrtc_offer', {
             offer: pc.localDescription,
             to: targetUserId,
-            from: userId
+            from: userId || socketRef.current.id
           });
           console.log('Offer sent to', targetUserId);
         } else {

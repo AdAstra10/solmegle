@@ -29,11 +29,37 @@ const waitingUsers = new Map(); // userId -> {socket, timestamp, priority}
 const activeConnections = new Map(); // userId -> partnerId
 const connectionLog = new Map(); // For debugging connections
 
+// Helper function to get a socket by user ID
+const getSocketByUserId = (userId) => {
+  // First check if it's a direct socket ID match
+  const socket = io.sockets.sockets.get(userId);
+  if (socket) {
+    return socket;
+  }
+  
+  // Otherwise, search through waiting users
+  for (const [id, data] of waitingUsers.entries()) {
+    if (id === userId) {
+      return data.socket;
+    }
+  }
+  
+  // If not found, search through all connected sockets
+  for (const socket of io.sockets.sockets.values()) {
+    if (socket.userId === userId) {
+      return socket;
+    }
+  }
+  
+  console.log(`Socket not found for userId: ${userId}`);
+  return null;
+};
+
 // Handle socket connections
 io.on('connection', (socket) => {
   console.log('New user connected:', socket.id);
   
-  // Store the socket ID as a backup userId if none is provided
+  // Store the socket ID as the userId
   socket.userId = socket.id;
   
   // Update waiting count for all connected users
@@ -46,6 +72,7 @@ io.on('connection', (socket) => {
   // Log active users and connections for debugging
   console.log(`Current active connections: ${activeConnections.size / 2} pairs`);
   console.log(`Current waiting users: ${waitingUsers.size}`);
+  console.log(`Active waiting users: ${Array.from(waitingUsers.keys()).join(', ')}`);
   
   // Find partner function with priority matching
   socket.on('find_partner', (data) => {
@@ -96,28 +123,30 @@ io.on('connection', (socket) => {
     }
     
     // Find an available partner with prioritization by waiting time
-    if (waitingUsers.size > 0) {
-      // Sort waiting users by time (oldest first) to be fair
-      const sortedWaitingUsers = Array.from(waitingUsers.entries())
-        .sort((a, b) => a[1].timestamp - b[1].timestamp);
-      
-      // Get the best match based on waiting time
-      const [partnerId, partnerData] = sortedWaitingUsers[0];
+    // IMPORTANT: Prioritize finding a match instead of immediately adding to waiting list
+    const availablePartners = Array.from(waitingUsers.entries())
+      .filter(([partnerId, _]) => partnerId !== userId) // Don't match with self
+      .sort((a, b) => a[1].timestamp - b[1].timestamp); // Sort by waiting time (oldest first)
+    
+    if (availablePartners.length > 0) {
+      // Find the first available partner
+      const [partnerId, partnerData] = availablePartners[0];
       const partnerSocket = partnerData.socket;
       
       const waitTime = Date.now() - partnerData.timestamp;
       console.log(`Matching ${userId} with waiting user ${partnerId} (waited: ${waitTime}ms)`);
       
-      // Check if partner socket is still valid
+      // Check if partner socket is still valid and connected
       if (!partnerSocket || !partnerSocket.connected) {
-        console.log(`Partner socket ${partnerId} is no longer valid or connected - removing from waiting list`);
+        console.log(`Partner socket ${partnerId} is no longer valid or connected - removing from waiting list and trying again`);
         waitingUsers.delete(partnerId);
-        // Try again with another user
-        socket.emit('find_partner', userId);
+        
+        // Try again with another user by recalling this function
+        process.nextTick(() => socket.emit('find_partner', userId));
         return;
       }
       
-      // Remove partner from waiting list
+      // CRITICAL: Remove partner from waiting list BEFORE sending match notifications
       waitingUsers.delete(partnerId);
       
       // Create active connection
@@ -133,9 +162,26 @@ io.on('connection', (socket) => {
         timestamp: new Date().toISOString()
       });
       
-      // Notify both users about the match
+      // Double check that neither user is still in waiting list (just to be safe)
+      waitingUsers.delete(userId);
+      waitingUsers.delete(partnerId);
+      
+      // IMPORTANT: Make sure both users are properly notified
+      console.log(`Sending matched events to ${userId} and ${partnerId}`);
+      
+      // Send match notifications with a slight delay between them
       socket.emit('matched', partnerId);
-      partnerSocket.emit('matched', userId);
+      setTimeout(() => {
+        if (partnerSocket && partnerSocket.connected) {
+          partnerSocket.emit('matched', userId);
+          console.log(`Match notification sent to both users`);
+        } else {
+          console.log(`Partner socket disconnected before match notification, cleaning up`);
+          activeConnections.delete(userId);
+          activeConnections.delete(partnerId);
+          socket.emit('partner_disconnected');
+        }
+      }, 100);
       
       console.log(`Connection established between ${userId} and ${partnerId}`);
       console.log(`Active connections: ${activeConnections.size / 2} pairs`);
@@ -160,20 +206,31 @@ io.on('connection', (socket) => {
     // Forward the offer to the target user
     const targetSocket = getSocketByUserId(data.to);
     if (targetSocket) {
-      // Verify the connection is active
+      // Verify the connection is active or create one
       if (activeConnections.has(data.from) && activeConnections.get(data.from) === data.to) {
+        console.log(`Forwarding WebRTC offer to established partner ${data.to}`);
         targetSocket.emit('webrtc_offer', data);
-        console.log(`Forwarded WebRTC offer to ${data.to}`);
       } else {
         console.log(`Connection between ${data.from} and ${data.to} is not active - creating connection first`);
         // Create the connection before forwarding the offer
         activeConnections.set(data.from, data.to);
         activeConnections.set(data.to, data.from);
-        // Notify both users about the match
+        
+        // Make sure neither user is in waiting list
+        waitingUsers.delete(data.from);
+        waitingUsers.delete(data.to);
+        
+        // First notify both users about the match
         socket.emit('matched', data.to);
         targetSocket.emit('matched', data.from);
-        // Now forward the offer
-        targetSocket.emit('webrtc_offer', data);
+        
+        // Wait for a moment before forwarding the offer to ensure clients are ready
+        setTimeout(() => {
+          if (targetSocket.connected) {
+            targetSocket.emit('webrtc_offer', data);
+            console.log(`Forwarded WebRTC offer after connection creation`);
+          }
+        }, 500);
       }
     } else {
       console.log(`Target user ${data.to} not found for WebRTC offer`);
@@ -301,23 +358,6 @@ io.on('connection', (socket) => {
     clearInterval(statsInterval);
   });
 });
-
-// Helper function to get socket by userId
-function getSocketByUserId(userId) {
-  // First check if the user is in the waiting list
-  if (waitingUsers.has(userId)) {
-    return waitingUsers.get(userId).socket;
-  }
-  
-  // If not in waiting list, check all connected sockets
-  for (const socket of io.sockets.sockets.values()) {
-    if (socket.userId === userId) {
-      return socket;
-    }
-  }
-  
-  return null;
-}
 
 // Start server
 server.listen(PORT, () => {
