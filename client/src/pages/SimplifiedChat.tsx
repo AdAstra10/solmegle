@@ -112,14 +112,10 @@ const SolmegleChat: React.FC = () => {
     return new Promise<void>((resolve, reject) => {
       // Define camera constraints for better quality
       const constraints = {
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 }
-        },
+        video: true, // Simplified to ensure compatibility across browsers
         audio: true
       };
-  
+
       console.log('Requesting camera/mic access with constraints:', constraints);
       
       navigator.mediaDevices.getUserMedia(constraints)
@@ -129,32 +125,43 @@ const SolmegleChat: React.FC = () => {
           // Store stream reference for WebRTC
           userStreamRef.current = stream;
           
-          if (userVideoRef.current) {
-            // Stop any existing tracks
-            const existingStream = userVideoRef.current.srcObject as MediaStream;
-            if (existingStream) {
-              existingStream.getTracks().forEach(track => track.stop());
+          // Set a small timeout to ensure the ref is available
+          setTimeout(() => {
+            if (userVideoRef.current) {
+              // Stop any existing tracks
+              const existingStream = userVideoRef.current.srcObject as MediaStream;
+              if (existingStream) {
+                existingStream.getTracks().forEach(track => track.stop());
+              }
+              
+              // Set new stream
+              userVideoRef.current.srcObject = stream;
+              
+              console.log("Set user video source to stream");
+              setIsCameraAllowed(true);
+              resolve();
+              
+              // Play after a slight delay to ensure DOM is ready
+              setTimeout(() => {
+                if (userVideoRef.current) {
+                  userVideoRef.current.play()
+                    .then(() => {
+                      console.log("User video is now playing");
+                      logVideoStatus();
+                    })
+                    .catch(err => {
+                      console.error("Error playing user video:", err);
+                      // Don't reject, just log the error
+                    });
+                }
+              }, 100);
+            } else {
+              console.warn("User video ref is not available yet, saving stream for later");
+              // Still mark camera as allowed since we have the stream
+              setIsCameraAllowed(true);
+              resolve();
             }
-            
-            // Set new stream
-            userVideoRef.current.srcObject = stream;
-            
-            // Ensure video starts playing
-            userVideoRef.current.play()
-              .then(() => {
-                console.log("User video is now playing");
-                logVideoStatus();
-                setIsCameraAllowed(true);
-                resolve();
-              })
-              .catch(err => {
-                console.error("Error playing user video:", err);
-                reject(err);
-              });
-          } else {
-            console.error("User video ref is null, cannot display camera");
-            reject(new Error("User video ref is null"));
-          }
+          }, 100);
         })
         .catch(error => {
           console.error('Camera access error:', error);
@@ -220,42 +227,39 @@ const SolmegleChat: React.FC = () => {
       // Cleanup any existing connections
       cleanupPeerConnection();
       
-      // Create new peer connection
+      // Create new peer connection with simplified config
       const pc = new RTCPeerConnection(rtcConfig);
       peerConnectionRef.current = pc;
       
       // Log connection state changes for debugging
       pc.onconnectionstatechange = () => {
-        console.log(`Connection state changed to: ${pc.connectionState}`);
-        setConnectionStatus(pc.connectionState);
+        const state = pc.connectionState;
+        console.log(`Connection state changed to: ${state}`);
+        setConnectionStatus(state);
         
-        if (pc.connectionState === 'connected') {
+        if (state === 'connected') {
           console.log('Peers successfully connected!');
           setIsRealPartner(true);
           retryCountRef.current = 0;
-        } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
-          console.warn(`Connection state is ${pc.connectionState}, may need to restart connection`);
+        } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+          console.warn(`Connection state is ${state}, may need to restart`);
           
-          // Only attempt reconnection if we've tried fewer than maxRetries times
           if (retryCountRef.current < maxRetries) {
-            setConnectionStatus(`Connection ${pc.connectionState}, attempting to reconnect...`);
+            setConnectionStatus(`Connection ${state}, reconnecting... (${retryCountRef.current + 1}/${maxRetries})`);
             
-            // Clear any existing retry timeout
             if (retryTimeoutRef.current) {
               clearTimeout(retryTimeoutRef.current);
             }
             
-            // Wait a moment before trying to reconnect
             retryTimeoutRef.current = setTimeout(() => {
-              cleanupPeerConnection();
               retryCountRef.current += 1;
+              cleanupPeerConnection();
               
-              // Attempt to establish a new connection
-              if (socketRef.current) {
-                console.log(`Retrying connection, attempt ${retryCountRef.current}`);
+              if (socketRef.current && socketRef.current.connected) {
+                console.log(`Retrying connection, attempt ${retryCountRef.current}/${maxRetries}`);
                 connectToPartner();
               }
-            }, 2000);
+            }, 2000); 
           } else {
             console.error(`Connection failed after ${maxRetries} retries`);
             setConnectionStatus(`Connection failed after ${maxRetries} retries. Please try New Chat.`);
@@ -263,101 +267,186 @@ const SolmegleChat: React.FC = () => {
         }
       };
       
-      // Monitor ice connection state
-      pc.oniceconnectionstatechange = () => {
-        console.log(`ICE connection state: ${pc.iceConnectionState}`);
-        
-        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
-          console.log('ICE connection established successfully');
-        }
-      };
-      
-      // Add our stream to the connection
+      // Add stream to connection FIRST before setting up other handlers
       if (userStreamRef.current) {
-        console.log('Adding local stream tracks to connection', userStreamRef.current.getTracks().length);
-        userStreamRef.current.getTracks().forEach(track => {
-          console.log(`Adding track: ${track.kind} to RTCPeerConnection`);
-          pc.addTrack(track, userStreamRef.current!);
-        });
-      } else {
-        console.error("No local stream to add to peer connection");
-        // Try to get the user media and then create the connection again
-        requestCameraAccess().then(() => {
-          if (userStreamRef.current) {
-            userStreamRef.current.getTracks().forEach(track => {
-              pc.addTrack(track, userStreamRef.current!);
-            });
+        const stream = userStreamRef.current;
+        console.log(`Adding stream with ${stream.getTracks().length} tracks to peer connection`);
+        
+        stream.getTracks().forEach(track => {
+          try {
+            console.log(`Adding ${track.kind} track to peer connection`);
+            pc.addTrack(track, stream);
+          } catch (err) {
+            console.error(`Error adding ${track.kind} track:`, err);
           }
         });
+      } else {
+        console.warn("No local stream available when creating peer connection");
+        
+        // Request camera access and try again
+        requestCameraAccess()
+          .then(() => {
+            if (userStreamRef.current && peerConnectionRef.current) {
+              userStreamRef.current.getTracks().forEach(track => {
+                peerConnectionRef.current!.addTrack(track, userStreamRef.current!);
+              });
+              console.log("Added tracks after requesting camera access");
+            }
+          })
+          .catch(err => console.error("Failed to get camera for peer connection:", err));
       }
       
       // Handle ICE candidates
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           console.log(`Generated ICE candidate for ${partnerId}`);
-          if (socketRef.current) {
+          if (socketRef.current && socketRef.current.connected) {
             socketRef.current.emit('webrtc_ice_candidate', {
               candidate: event.candidate,
               to: partnerId,
               from: userId
             });
+          } else {
+            console.warn("Socket not connected when trying to send ICE candidate");
           }
         } else {
           console.log('All ICE candidates have been generated');
         }
       };
       
-      // Handle receiving remote stream
+      // Monitor ICE connection state
+      pc.oniceconnectionstatechange = () => {
+        console.log(`ICE connection state: ${pc.iceConnectionState}`);
+        
+        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+          console.log('ICE connection established successfully');
+          setConnectionStatus('connected');
+        } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+          console.warn(`ICE connection problem: ${pc.iceConnectionState}`);
+        }
+      };
+      
+      // Handle receiving remote stream with better error handling
       pc.ontrack = (event) => {
-        console.log('Received remote track!', event.streams[0]);
-        if (strangerVideoRef.current && event.streams[0]) {
-          strangerVideoRef.current.srcObject = event.streams[0];
-          setIsRealPartner(true);
-          console.log('Set stranger video source to remote stream');
+        console.log(`Received remote ${event.track.kind} track`);
+        
+        if (event.streams && event.streams[0]) {
+          console.log('Got remote stream with tracks:', event.streams[0].getTracks().length);
           
-          // Ensure the video plays
-          strangerVideoRef.current.play()
-            .then(() => console.log('Remote video started playing'))
-            .catch(err => console.error('Error playing remote video:', err));
+          if (strangerVideoRef.current) {
+            console.log('Setting remote stream to stranger video element');
+            strangerVideoRef.current.srcObject = event.streams[0];
+            setIsRealPartner(true);
+            
+            strangerVideoRef.current.onloadedmetadata = () => {
+              console.log('Remote video metadata loaded');
+              strangerVideoRef.current!.play()
+                .then(() => console.log('Remote video playing'))
+                .catch(err => console.error('Error playing remote video:', err));
+            };
+          } else {
+            console.warn('Stranger video ref not available for remote stream');
+          }
+        } else {
+          console.warn('Received track event without streams');
         }
       };
       
       // If we're the initiator, create and send an offer
       if (isInitiator) {
-        const offerOptions = {
-          offerToReceiveAudio: true,
-          offerToReceiveVideo: true
-        };
+        console.log('Creating offer as initiator');
         
-        console.log('Creating offer as initiator', offerOptions);
-        pc.createOffer(offerOptions)
-          .then(offer => {
-            console.log('Created offer, setting local description');
-            return pc.setLocalDescription(offer);
-          })
-          .then(() => {
-            console.log('Local description set, sending offer to partner');
-            if (socketRef.current && pc.localDescription) {
-              socketRef.current.emit('webrtc_offer', {
-                offer: pc.localDescription,
-                to: partnerId,
-                from: userId
-              });
-            } else {
-              console.error('Cannot send offer: socket or local description is null');
-            }
-          })
-          .catch(err => console.error('Error creating offer:', err));
+        // Use standard options
+        pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
+        })
+        .then(offer => {
+          console.log('Created offer, setting local description');
+          return pc.setLocalDescription(offer);
+        })
+        .then(() => {
+          if (!pc.localDescription) {
+            throw new Error("Local description not set");
+          }
+          
+          console.log('Local description set, sending offer');
+          if (socketRef.current && socketRef.current.connected) {
+            socketRef.current.emit('webrtc_offer', {
+              offer: pc.localDescription,
+              to: partnerId,
+              from: userId
+            });
+          } else {
+            throw new Error("Socket not connected when trying to send offer");
+          }
+        })
+        .catch(err => {
+          console.error('Error creating/sending offer:', err);
+          setConnectionStatus(`Error creating offer: ${err.message}`);
+        });
       }
       
       return pc;
     } catch (error) {
       console.error('Error creating peer connection:', error);
+      setConnectionStatus(`Connection error: ${error instanceof Error ? error.message : 'unknown'}`);
       return null;
     }
-  }, [userId, cleanupPeerConnection, requestCameraAccess, connectToPartner]);
+  }, [userId, cleanupPeerConnection, requestCameraAccess, connectToPartner, maxRetries]);
 
-  // Initialize socket connection
+  // Fix for camera not showing after page refresh or tab focus
+  useEffect(() => {
+    // Function to reinitialize camera when page gets focus
+    const handleFocus = () => {
+      console.log("Window focused - checking camera status");
+      
+      if (isCameraAllowed) {
+        // Check if camera stream is missing or inactive
+        if (!userVideoRef.current?.srcObject || 
+            !(userVideoRef.current?.srcObject as MediaStream)?.active ||
+            (userVideoRef.current?.srcObject as MediaStream)?.getTracks().some(track => !track.enabled || track.muted)) {
+          
+          console.log("Camera needs to be reinitialized after focus");
+          // Try to reuse existing stream if possible
+          if (userStreamRef.current && userStreamRef.current.active) {
+            console.log("Reusing existing active stream");
+            if (userVideoRef.current) {
+              userVideoRef.current.srcObject = userStreamRef.current;
+              userVideoRef.current.play()
+                .then(() => console.log("Video playing after focus with existing stream"))
+                .catch(err => console.error("Error playing video after focus:", err));
+            }
+          } else {
+            // Request new camera access if stream is inactive
+            requestCameraAccess()
+              .catch(error => {
+                console.error('Camera reinitialization failed:', error);
+              });
+          }
+        } else {
+          console.log("Camera is already active after focus");
+        }
+      }
+    };
+
+    // Add focus event listener to window
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        console.log("Page visibility changed to visible");
+        setTimeout(handleFocus, 300); // Small delay for browser to settle
+      }
+    });
+    
+    // Clean up
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('visibilitychange', handleFocus);
+    };
+  }, [isCameraAllowed, requestCameraAccess]);
+
+  // Initialize socket connection with better reconnection handling
   useEffect(() => {
     // Generate a persistent userId if not already set
     if (!userId) {
@@ -368,16 +457,20 @@ const SolmegleChat: React.FC = () => {
     
     console.log('Initializing socket connection with userId:', userId);
     
+    // Handle socket disconnection more gracefully
+    let disconnectTimer: NodeJS.Timeout | null = null;
+    
     // Create socket connection with better error handling
     const socket = io(window.location.origin, {
-      transports: ['websocket'],
-      upgrade: false,
+      transports: ['websocket', 'polling'], // Try WebSocket, fallback to polling
+      upgrade: true, // Allow transport upgrade
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: 10,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       timeout: 20000,
-      forceNew: true
+      forceNew: true,
+      autoConnect: true
     });
     
     socketRef.current = socket;
@@ -385,11 +478,17 @@ const SolmegleChat: React.FC = () => {
     socket.on('connect', () => {
       console.log('Connected to server with socket id:', socket.id);
       setConnectionStatus('connected to server');
+      
+      // Clear any pending disconnection timer
+      if (disconnectTimer) {
+        clearTimeout(disconnectTimer);
+        disconnectTimer = null;
+      }
     });
     
     socket.on('connect_error', (error) => {
       console.error('Socket connection error:', error);
-      setConnectionStatus('server connection error');
+      setConnectionStatus(`server connection error: ${error.message}`);
     });
 
     socket.on('waiting_count', (count: number) => {
@@ -413,38 +512,60 @@ const SolmegleChat: React.FC = () => {
       
       try {
         // Create peer connection if it doesn't exist
-        if (!peerConnectionRef.current) {
-          createPeerConnection(data.from, false);
+        let pc = peerConnectionRef.current;
+        
+        if (!pc) {
+          console.log('Creating new peer connection for answer');
+          pc = createPeerConnection(data.from, false);
         }
         
-        if (!peerConnectionRef.current) {
+        if (!pc) {
           throw new Error("Failed to create peer connection for answer");
         }
         
+        // Make sure we have camera access before proceeding
+        if (!userStreamRef.current) {
+          console.log('Requesting camera access before processing offer');
+          await requestCameraAccess();
+        }
+        
         // Set the remote description from the offer
-        await peerConnectionRef.current.setRemoteDescription(
-          new RTCSessionDescription(data.offer)
-        );
-        console.log('Set remote description from offer');
+        const offerDesc = new RTCSessionDescription(data.offer);
+        console.log('Setting remote description from offer');
+        await pc.setRemoteDescription(offerDesc);
         
         // Create an answer
-        const answer = await peerConnectionRef.current.createAnswer();
-        console.log('Created answer');
+        console.log('Creating answer');
+        const answer = await pc.createAnswer();
         
         // Set local description from the answer
-        await peerConnectionRef.current.setLocalDescription(answer);
-        console.log('Set local description from answer');
+        console.log('Setting local description from answer');
+        await pc.setLocalDescription(answer);
         
-        // Send the answer back
-        socket.emit('webrtc_answer', {
-          answer,
-          to: data.from,
-          from: userId
-        });
-        console.log('Sent answer back to:', data.from);
+        // Send the answer back after a slight delay to ensure local description is set
+        setTimeout(() => {
+          if (socket.connected && pc.localDescription) {
+            console.log('Sending answer back to:', data.from);
+            socket.emit('webrtc_answer', {
+              answer: pc.localDescription,
+              to: data.from,
+              from: userId
+            });
+          } else {
+            console.error('Cannot send answer: socket disconnected or local description not set');
+          }
+        }, 500);
       } catch (error) {
         console.error('Error handling WebRTC offer:', error);
-        setConnectionStatus('error handling connection offer');
+        setConnectionStatus(`error handling offer: ${error instanceof Error ? error.message : 'unknown'}`);
+        
+        // Try to recover by restarting the connection
+        setTimeout(() => {
+          cleanupPeerConnection();
+          if (socket.connected) {
+            socket.emit('find_partner', userId);
+          }
+        }, 2000);
       }
     });
     
@@ -453,7 +574,9 @@ const SolmegleChat: React.FC = () => {
       setConnectionStatus('received connection answer');
       
       try {
-        if (!peerConnectionRef.current) {
+        const pc = peerConnectionRef.current;
+        
+        if (!pc) {
           console.error('No peer connection when receiving answer');
           return;
         }
@@ -463,21 +586,25 @@ const SolmegleChat: React.FC = () => {
           return;
         }
         
-        await peerConnectionRef.current.setRemoteDescription(
-          new RTCSessionDescription(data.answer)
-        );
+        // Set the remote description from the answer
+        const answerDesc = new RTCSessionDescription(data.answer);
+        await pc.setRemoteDescription(answerDesc);
+        
         console.log('Successfully set remote description from answer');
+        setConnectionStatus('connecting...');
       } catch (error) {
         console.error('Error handling WebRTC answer:', error);
-        setConnectionStatus('error handling connection answer');
+        setConnectionStatus(`error handling answer: ${error instanceof Error ? error.message : 'unknown'}`);
       }
     });
     
     socket.on('webrtc_ice_candidate', async (data: any) => {
-      console.log('Received ICE candidate from:', data.from);
+      console.log(`Received ICE candidate from: ${data.from}`);
       
       try {
-        if (!peerConnectionRef.current) {
+        const pc = peerConnectionRef.current;
+        
+        if (!pc) {
           console.error('No peer connection when receiving ICE candidate');
           return;
         }
@@ -487,9 +614,10 @@ const SolmegleChat: React.FC = () => {
           return;
         }
         
-        await peerConnectionRef.current.addIceCandidate(
-          new RTCIceCandidate(data.candidate)
-        );
+        // Add the ICE candidate
+        const candidate = new RTCIceCandidate(data.candidate);
+        await pc.addIceCandidate(candidate);
+        
         console.log('Added ICE candidate from partner');
       } catch (error) {
         console.error('Error handling ICE candidate:', error);
@@ -497,7 +625,10 @@ const SolmegleChat: React.FC = () => {
     });
 
     socket.on('user_message', (message: string) => {
-      setMessages(prev => [...prev, { text: message, isUser: false }]);
+      console.log('Received message from partner');
+      if (message && typeof message === 'string') {
+        setMessages(prev => [...prev, { text: message, isUser: false }]);
+      }
     });
 
     socket.on('partner_disconnected', () => {
@@ -512,14 +643,27 @@ const SolmegleChat: React.FC = () => {
       }, 3000);
     });
     
-    socket.on('disconnect', () => {
-      console.log('Disconnected from server');
-      setConnectionStatus('disconnected from server');
-      cleanupPeerConnection();
+    socket.on('disconnect', (reason) => {
+      console.log(`Disconnected from server: ${reason}`);
+      setConnectionStatus(`disconnected: ${reason}`);
+      
+      // Set a timer to clean up if reconnection doesn't happen quickly
+      disconnectTimer = setTimeout(() => {
+        cleanupPeerConnection();
+        
+        // Try to reconnect explicitly after a brief delay
+        if (!socket.connected) {
+          console.log("Attempting to reconnect socket manually");
+          socket.connect();
+        }
+      }, 5000);
     });
 
     return () => {
       console.log('Cleaning up socket and connection');
+      if (disconnectTimer) {
+        clearTimeout(disconnectTimer);
+      }
       cleanupPeerConnection();
       socket.disconnect();
     };
@@ -529,18 +673,29 @@ const SolmegleChat: React.FC = () => {
   const sendMessage = useCallback(() => {
     if (inputMessage.trim() === '') return;
     
-    // Add message to local state
+    // Add message to local state immediately
     setMessages(prev => [...prev, { text: inputMessage, isUser: true }]);
+    const messageToSend = inputMessage;
+    setInputMessage(''); // Clear input field immediately
     
     // If connected to a real partner, send via socket
-    if (isRealPartner && socketRef.current) {
-      socketRef.current.emit('send_message', { 
-        to: userId, // server will know the partner
-        message: inputMessage 
-      });
+    if (isRealPartner && socketRef.current && socketRef.current.connected) {
+      // Get the partner ID from the active connections on the server
+      const activePeerId = peerConnectionRef.current?.connectionState === 'connected' ? 
+        true : false;
+      
+      if (activePeerId) {
+        console.log('Sending message to partner via WebSocket');
+        socketRef.current.emit('send_message', { 
+          to: userId, // The server will find the partner from this
+          message: messageToSend
+        });
+      } else {
+        console.warn('Cannot send message: no active peer connection');
+      }
+    } else {
+      console.log('Not sending message: no real partner or socket disconnected');
     }
-    
-    setInputMessage('');
   }, [inputMessage, isRealPartner, userId]);
 
   // Handle message input with Enter key
@@ -550,60 +705,54 @@ const SolmegleChat: React.FC = () => {
     }
   }, [sendMessage]);
 
-  // Request camera access as soon as the component mounts
+  // Improved effect to ensure camera access is properly handled
   useEffect(() => {
-    requestCameraAccess()
-      .catch(error => {
-        console.error('Initial camera setup failed:', error);
-      });
+    console.log("Initial camera access attempt");
+    let mounted = true;
+    
+    // Wait a moment for refs to be available
+    const timer = setTimeout(() => {
+      if (mounted) {
+        requestCameraAccess()
+          .catch(error => {
+            console.error('Initial camera setup failed:', error);
+          });
+      }
+    }, 500);
       
     // Cleanup function to stop all tracks when component unmounts
     return () => {
+      mounted = false;
+      clearTimeout(timer);
+      
+      console.log("Component unmounting, cleaning up camera");
+      
       if (userStreamRef.current) {
-        userStreamRef.current.getTracks().forEach(track => track.stop());
+        userStreamRef.current.getTracks().forEach(track => {
+          console.log(`Stopping track: ${track.kind}`);
+          track.stop();
+        });
         userStreamRef.current = null;
       }
       
-      if (userVideoRef.current && userVideoRef.current.srcObject) {
-        const stream = userVideoRef.current.srcObject as MediaStream;
-        if (stream) {
-          stream.getTracks().forEach(track => track.stop());
-        }
-      }
-      
-      // Clear any pending retry timers
       if (retryTimeoutRef.current) {
         clearTimeout(retryTimeoutRef.current);
       }
     };
   }, [requestCameraAccess]);
-  
-  // Fix for camera not showing after page refresh by adding a focus event listener
-  useEffect(() => {
-    // Function to reinitialize camera when page gets focus
-    const handleFocus = () => {
-      console.log("Window focused - checking camera status");
-      if (isCameraAllowed && (!userVideoRef.current?.srcObject || 
-          !(userVideoRef.current?.srcObject as MediaStream)?.active)) {
-        console.log("Camera needs to be reinitialized");
-        requestCameraAccess()
-          .catch(error => {
-            console.error('Camera reinitialization failed:', error);
-          });
-      }
-    };
 
-    // Add focus event listener to window
-    window.addEventListener('focus', handleFocus);
-    
-    // Check camera on mount as well
-    handleFocus();
-    
-    // Clean up
-    return () => {
-      window.removeEventListener('focus', handleFocus);
-    };
-  }, [isCameraAllowed, requestCameraAccess]);
+  // Additional effect to handle camera stream when refs become available
+  useEffect(() => {
+    // This effect will run when the component mounts/updates and userVideoRef changes
+    if (userStreamRef.current && userVideoRef.current && !userVideoRef.current.srcObject) {
+      console.log("User video ref is now available, setting srcObject");
+      userVideoRef.current.srcObject = userStreamRef.current;
+      
+      userVideoRef.current.play()
+        .then(() => console.log("User video playing after ref update"))
+        .catch(err => console.error("Error playing video after ref update:", err));
+    }
+  }, [userVideoRef.current]);
 
   // Add video ended event listener
   useEffect(() => {
