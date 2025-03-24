@@ -285,10 +285,24 @@ const SolmegleChat: React.FC = () => {
   const createPeerConnection = useCallback((targetUserId: string, isInitiator: boolean) => {
     console.log(`Creating peer connection to ${targetUserId} as ${isInitiator ? 'initiator' : 'responder'}`);
     
-    // Cleanup any existing connections
-    cleanupPeerConnection();
+    // CRITICAL FIX: Check if we're already connecting to avoid duplicate connections
+    if (peerConnectionRef.current) {
+      console.log("We already have an active peer connection. Checking if it's the same partner...");
+      if (partnerId === targetUserId) {
+        console.log("Already have connection to this partner, not recreating");
+        return peerConnectionRef.current;
+      } else {
+        console.log("Cleaning up existing connection before creating new one");
+        cleanupPeerConnection();
+      }
+    }
     
-    // CRITICAL FIX: Simplify configuration and ensure it works with mobile networks
+    // CRITICAL FIX: Set flags to prevent multiple connection attempts
+    setIsRealPartner(true);
+    setIsActiveConnection(true);
+    setIsConnecting(true);
+    
+    // Create new peer connection with simplified config
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -309,8 +323,14 @@ const SolmegleChat: React.FC = () => {
     
     peerConnectionRef.current = pc;
     
-    // Add connection state monitoring
+    // Add connection state monitoring with more frequent checks
     const connectionMonitor = setInterval(() => {
+      if (!peerConnectionRef.current) {
+        console.log("Connection monitor: No peer connection, clearing interval");
+        clearInterval(connectionMonitor);
+        return;
+      }
+      
       if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
         console.log(`Connection monitor: WebRTC state is ${pc.connectionState}, attempting recovery`);
         
@@ -325,12 +345,12 @@ const SolmegleChat: React.FC = () => {
           }
         }
       }
-    }, 5000);
+    }, 2000); // Check more frequently
     
     // Store the interval reference for cleanup
     connectionMonitorRef.current = connectionMonitor;
     
-    // Add simple connection state logging
+    // Add simple connection state logging with better error handling
     pc.onconnectionstatechange = () => {
       console.log(`Connection state changed to: ${pc.connectionState}`);
       setConnectionStatus(`Connection: ${pc.connectionState}`);
@@ -340,14 +360,14 @@ const SolmegleChat: React.FC = () => {
         setIsRealPartner(true);
         setIsActiveConnection(true);
         setIsConnecting(false);
+        setIsSearchingForPartner(false); // Stop searching once connected
       } else if (pc.connectionState === 'failed') {
-        console.warn('WebRTC connection failed, attempting reconnect');
-        // Try to restart the connection after a short delay
-        setTimeout(() => {
-          if (socketRef.current) {
-            findPartner(socketRef.current);
-          }
-        }, 2000);
+        console.warn('WebRTC connection failed');
+        setConnectionStatus("Connection failed. Click 'New Chat' to try again.");
+        setIsConnecting(false);
+        
+        // Don't automatically reconnect - let the user initiate a new chat
+        // This prevents the camera glitching due to rapid reconnection attempts
       }
     };
     
@@ -360,7 +380,10 @@ const SolmegleChat: React.FC = () => {
         setConnectionStatus('Connection unstable - trying to recover...');
       } else if (pc.iceConnectionState === 'failed') {
         console.log('ICE connection failed');
-        setConnectionStatus('Connection failed - trying to reconnect...');
+        setConnectionStatus('Connection failed - please start a new chat');
+        
+        // CRITICAL FIX: Don't automatically restart - let user choose to reconnect
+        // This prevents camera glitching from constant reconnection attempts
       } else if (pc.iceConnectionState === 'connected') {
         console.log('ICE connected successfully');
         setConnectionStatus('Connected');
@@ -372,37 +395,89 @@ const SolmegleChat: React.FC = () => {
       const stream = userStreamRef.current;
       console.log(`Adding ${stream.getTracks().length} local tracks to peer connection`);
       
+      // CRITICAL FIX: Ensure all tracks are enabled and ready before adding
+      let allTracksReady = true;
       stream.getTracks().forEach(track => {
-        // Ensure tracks are enabled
-        track.enabled = true;
-        try {
-          pc.addTrack(track, stream);
-          console.log(`Added ${track.kind} track to peer connection`);
-        } catch (err) {
-          console.error(`Error adding track to peer connection:`, err);
+        if (track.readyState !== 'live') {
+          console.warn(`Track ${track.kind} is not ready (state: ${track.readyState})`);
+          allTracksReady = false;
         }
       });
+      
+      if (!allTracksReady) {
+        console.log("Not all tracks are ready, will delay adding tracks");
+        // If tracks aren't ready, wait a moment before adding
+        setTimeout(() => {
+          if (peerConnectionRef.current === pc) {
+            stream.getTracks().forEach(track => {
+              console.log(`Adding delayed ${track.kind} track to peer connection`);
+              track.enabled = true;
+              try {
+                pc.addTrack(track, stream);
+              } catch (err) {
+                console.error(`Error adding track to peer connection:`, err);
+              }
+            });
+          }
+        }, 500);
+      } else {
+        // Tracks are ready, add them immediately
+        stream.getTracks().forEach(track => {
+          // Ensure tracks are enabled
+          track.enabled = true;
+          try {
+            pc.addTrack(track, stream);
+            console.log(`Added ${track.kind} track to peer connection`);
+          } catch (err) {
+            console.error(`Error adding track to peer connection:`, err);
+          }
+        });
+      }
     } else {
       console.error("No local stream available when creating peer connection!");
+      // CRITICAL FIX: Get camera access now if we don't have it
+      requestCameraAccess()
+        .then(() => {
+          console.log("Camera access granted after delayed attempt");
+          if (peerConnectionRef.current === pc && userStreamRef.current) {
+            // Now add tracks
+            userStreamRef.current.getTracks().forEach(track => {
+              track.enabled = true;
+              try {
+                pc.addTrack(track, userStreamRef.current!);
+                console.log(`Added delayed ${track.kind} track after camera access`);
+              } catch (err) {
+                console.error(`Error adding delayed track:`, err);
+              }
+            });
+          }
+        })
+        .catch(err => {
+          console.error("Failed to get camera access during connection:", err);
+        });
     }
     
-    // Handle ICE candidates simply
+    // Handle ICE candidates with better error handling
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         console.log(`Generated ICE candidate`);
         if (socketRef.current && socketRef.current.connected) {
-          socketRef.current.emit('webrtc_ice_candidate', {
-            candidate: event.candidate,
-            to: targetUserId,
-            from: userId || socketRef.current.id
-          });
+          try {
+            socketRef.current.emit('webrtc_ice_candidate', {
+              candidate: event.candidate,
+              to: targetUserId,
+              from: userId || socketRef.current.id
+            });
+          } catch (err) {
+            console.error("Error sending ICE candidate:", err);
+          }
         }
       } else {
         console.log('All ICE candidates have been generated');
       }
     };
     
-    // Simplified remote track handling
+    // Simplified remote track handling with better error handling
     pc.ontrack = (event) => {
       console.log(`Received remote ${event.track.kind} track`);
       
@@ -411,53 +486,77 @@ const SolmegleChat: React.FC = () => {
         console.log(`Got remote stream with ${remoteStream.getTracks().length} tracks`);
         
         if (strangerVideoRef.current) {
-          strangerVideoRef.current.srcObject = remoteStream;
-          strangerVideoRef.current.muted = false;
-          
-          strangerVideoRef.current.onloadedmetadata = () => {
-            console.log('Remote video metadata loaded, playing...');
-            strangerVideoRef.current!.play()
-              .then(() => console.log('Remote video playing'))
-              .catch(err => {
-                console.error('Error playing remote video:', err);
-                // Try with muted if autoplay is blocked
-                if (err.name === 'NotAllowedError') {
-                  strangerVideoRef.current!.muted = true;
-                  return strangerVideoRef.current!.play();
-                }
-              });
-          };
+          try {
+            // CRITICAL FIX: More reliable remote video handling
+            strangerVideoRef.current.srcObject = remoteStream;
+            strangerVideoRef.current.muted = false;
+            
+            strangerVideoRef.current.onloadedmetadata = () => {
+              console.log('Remote video metadata loaded, playing...');
+              if (strangerVideoRef.current) {
+                strangerVideoRef.current.play()
+                  .then(() => console.log('Remote video playing'))
+                  .catch(err => {
+                    console.error('Error playing remote video:', err);
+                    // Try with muted if autoplay is blocked
+                    if (err.name === 'NotAllowedError' && strangerVideoRef.current) {
+                      strangerVideoRef.current.muted = true;
+                      return strangerVideoRef.current.play();
+                    }
+                  });
+              }
+            };
+            
+            // CRITICAL FIX: Add error handling for video playback issues
+            strangerVideoRef.current.onerror = (err) => {
+              console.error("Error with remote video element:", err);
+            };
+          } catch (err) {
+            console.error("Error setting remote stream:", err);
+          }
         } else {
           console.warn('Stranger video element not available');
         }
       }
     };
     
-    // Create and send offer if we're the initiator
+    // Create and send offer if we're the initiator with better error handling
     if (isInitiator) {
-      pc.createOffer()
-        .then(offer => {
-          console.log('Created offer, setting local description');
-          return pc.setLocalDescription(offer);
-        })
-        .then(() => {
-          // Wait a moment for ICE gathering before sending
-          setTimeout(() => {
-            if (pc.localDescription && socketRef.current) {
-              console.log('Sending WebRTC offer');
-              socketRef.current.emit('webrtc_offer', {
-                offer: pc.localDescription,
-                to: targetUserId,
-                from: userId || socketRef.current.id
-              });
-            }
-          }, 1000);
-        })
-        .catch(err => console.error('Error creating/sending offer:', err));
+      try {
+        pc.createOffer()
+          .then(offer => {
+            console.log('Created offer, setting local description');
+            return pc.setLocalDescription(offer);
+          })
+          .then(() => {
+            // Wait a moment for ICE gathering before sending
+            setTimeout(() => {
+              if (pc.localDescription && socketRef.current && socketRef.current.connected) {
+                console.log('Sending WebRTC offer');
+                try {
+                  socketRef.current.emit('webrtc_offer', {
+                    offer: pc.localDescription,
+                    to: targetUserId,
+                    from: userId || socketRef.current.id
+                  });
+                } catch (err) {
+                  console.error("Error sending WebRTC offer:", err);
+                }
+              }
+            }, 1000);
+          })
+          .catch(err => {
+            console.error('Error creating/sending offer:', err);
+            setConnectionStatus("Error creating connection. Try 'New Chat'");
+          });
+      } catch (err) {
+        console.error("Exception during offer creation:", err);
+        setConnectionStatus("Error creating connection. Try 'New Chat'");
+      }
     }
     
     return pc;
-  }, [userId, cleanupPeerConnection, findPartner]);
+  }, [userId, cleanupPeerConnection, findPartner, partnerId, requestCameraAccess]);
 
   // Handle partner disconnection more robustly
   const handlePartnerDisconnect = () => {
@@ -685,12 +784,26 @@ const SolmegleChat: React.FC = () => {
       newSocket.on("matched", (matchedPartnerId: string) => {
         console.log(`MATCHED EVENT RECEIVED: Matched with partner ${matchedPartnerId}`);
         
+        // CRITICAL FIX: Check if we're already matched with this partner
+        if (partnerId === matchedPartnerId && isRealPartner && isActiveConnection) {
+          console.log(`Already matched with ${matchedPartnerId}, not recreating connection`);
+          setConnectionStatus("Already connected with partner");
+          return;
+        }
+        
+        // CRITICAL FIX: Prevent multiple state updates causing camera glitching
+        if (isConnecting) {
+          console.log("Already in connecting state, will finish that first");
+          return;
+        }
+        
         // Update state to show matched
         setConnectionStatus(`Matched with a partner! Setting up connection...`);
         setPartnerId(matchedPartnerId);
         setIsRealPartner(true);
         setIsActiveConnection(true);
-        setIsConnecting(false);
+        setIsConnecting(true);
+        setIsSearchingForPartner(false); // Stop searching once matched
 
         // Since we found a real partner, clear any timeout for video fallback
         if (partnerConnectionTimeout.current) {
@@ -698,35 +811,63 @@ const SolmegleChat: React.FC = () => {
           partnerConnectionTimeout.current = null;
         }
 
+        // CRITICAL FIX: Use a single approach to get camera access and create connection
+        // to avoid camera glitching from multiple simultaneous attempts
+        const setupConnection = () => {
+          console.log("Setting up connection as initiator with partner", matchedPartnerId);
+          
+          // Ensure we're not already connecting to this partner
+          if (peerConnectionRef.current) {
+            // Use getReceivers to check for active remote tracks instead of getRemoteStreams
+            const hasRemoteTracks = peerConnectionRef.current.getReceivers().some(receiver => receiver.track && receiver.track.readyState === 'live');
+            if (hasRemoteTracks) {
+              console.log("We already have active remote tracks, not recreating connection");
+              return; // We already have a connection
+            }
+            
+            // Clean up any existing connection first
+            console.log("Cleaning up existing peer connection before creating new one");
+            cleanupPeerConnection();
+          }
+          
+          // Now create the new connection with small delay to allow state to settle
+          setTimeout(() => {
+            createPeerConnection(matchedPartnerId, true);
+          }, 500);
+        };
+
         // If we don't have camera access yet, get it first
         if (!userStreamRef.current) {
           console.log("No local stream available, requesting camera access first");
-          requestCameraAccess()
-            .then(() => {
-              console.log("Camera access granted, now creating WebRTC connection as initiator");
-              // Use setTimeout to ensure state updates have processed
-              setTimeout(() => {
-                if (peerConnectionRef.current) {
-                  console.log("Cleaning up existing peer connection before creating new one");
-                  cleanupPeerConnection();
-                }
-                createPeerConnection(matchedPartnerId, true);
-              }, 300);
-            })
-            .catch(err => {
-              console.error("Failed to get camera access after match:", err);
-              setConnectionStatus("Camera access denied. Please enable camera and try again.");
-            });
+          // Ensure we're not already requesting camera
+          if (!isCameraAllowed) {
+            requestCameraAccess()
+              .then(() => {
+                console.log("Camera access granted, can now create WebRTC connection");
+                // Short delay to ensure stream is ready
+                setTimeout(setupConnection, 1000);
+              })
+              .catch(err => {
+                console.error("Failed to get camera access after match:", err);
+                setConnectionStatus("Camera access denied. Please enable camera and try again.");
+                setIsConnecting(false);
+              });
+          } else {
+            // Camera is allowed but stream not ready - wait a moment
+            console.log("Camera is allowed but stream not ready, waiting briefly");
+            setTimeout(() => {
+              if (userStreamRef.current) {
+                setupConnection();
+              } else {
+                console.error("Stream still not available after wait");
+                setConnectionStatus("Camera error. Please refresh the page.");
+                setIsConnecting(false);
+              }
+            }, 1000);
+          }
         } else {
-          console.log("Already have local stream, creating WebRTC connection as initiator");
-          // Use setTimeout to ensure state updates have processed
-          setTimeout(() => {
-            if (peerConnectionRef.current) {
-              console.log("Cleaning up existing peer connection before creating new one");
-              cleanupPeerConnection();
-            }
-            createPeerConnection(matchedPartnerId, true);
-          }, 300);
+          console.log("Already have local stream, setting up connection");
+          setupConnection();
         }
       });
 
