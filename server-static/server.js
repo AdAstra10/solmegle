@@ -27,6 +27,7 @@ app.get('*', (req, res) => {
 // Store waiting users and active connections
 const waitingUsers = new Map(); // userId -> {socket, timestamp, priority}
 const activeConnections = new Map(); // userId -> partnerId
+const connectionLog = new Map(); // For debugging connections
 
 // Handle socket connections
 io.on('connection', (socket) => {
@@ -37,20 +38,20 @@ io.on('connection', (socket) => {
   
   // Update waiting count for all connected users
   const emitWaitingCount = () => {
-    io.emit('waiting_count', waitingUsers.size);
+    const count = waitingUsers.size;
+    console.log(`Broadcasting waiting count: ${count}`);
+    io.emit('waiting_count', count);
   };
   
   // Find partner function with priority matching
   socket.on('find_partner', (data) => {
     let userId;
-    let priority = 'high'; // Default to high priority to favor real connections
     
     // Handle different formats of data (string or object)
     if (typeof data === 'string') {
       userId = data;
     } else if (typeof data === 'object' && data !== null) {
       userId = data.userId || socket.id;
-      priority = data.priority || 'high';
     } else {
       userId = socket.id;
     }
@@ -58,25 +59,39 @@ io.on('connection', (socket) => {
     // Always assign the userId to the socket for easier reference
     socket.userId = userId;
     
-    console.log(`User ${userId} is looking for a partner (priority: ${priority})`);
+    console.log(`User ${userId} is looking for a partner`);
     
-    // If user is already in an active connection, disconnect them
+    // If user is already in an active connection, disconnect them first
+    // This happens when user clicks "New Chat" button
     if (activeConnections.has(userId)) {
       const partnerId = activeConnections.get(userId);
       const partnerSocket = getSocketByUserId(partnerId);
       
+      console.log(`User ${userId} is already connected to ${partnerId} - disconnecting them first`);
+      
       if (partnerSocket) {
         partnerSocket.emit('partner_disconnected');
+        console.log(`Notified partner ${partnerId} of disconnection`);
       }
+      
+      // Log the disconnection
+      connectionLog.set(`${userId}_${Date.now()}`, {
+        event: 'manual_disconnect',
+        partnerId: partnerId,
+        timestamp: new Date().toISOString()
+      });
       
       activeConnections.delete(userId);
       activeConnections.delete(partnerId);
     }
     
     // Remove from waiting list if already waiting
-    waitingUsers.delete(userId);
+    if (waitingUsers.has(userId)) {
+      console.log(`User ${userId} was already in waiting list - removing`);
+      waitingUsers.delete(userId);
+    }
     
-    // Find an available partner with prioritization
+    // Find an available partner with prioritization by waiting time
     if (waitingUsers.size > 0) {
       // Sort waiting users by time (oldest first) to be fair
       const sortedWaitingUsers = Array.from(waitingUsers.entries())
@@ -86,7 +101,8 @@ io.on('connection', (socket) => {
       const [partnerId, partnerData] = sortedWaitingUsers[0];
       const partnerSocket = partnerData.socket;
       
-      console.log(`Matching ${userId} with waiting user ${partnerId} (waited: ${Date.now() - partnerData.timestamp}ms)`);
+      const waitTime = Date.now() - partnerData.timestamp;
+      console.log(`Matching ${userId} with waiting user ${partnerId} (waited: ${waitTime}ms)`);
       
       // Remove partner from waiting list
       waitingUsers.delete(partnerId);
@@ -95,15 +111,27 @@ io.on('connection', (socket) => {
       activeConnections.set(userId, partnerId);
       activeConnections.set(partnerId, userId);
       
+      // Log the connection
+      connectionLog.set(`${userId}_${partnerId}_${Date.now()}`, {
+        event: 'match_created',
+        user1: userId,
+        user2: partnerId,
+        waitTime: waitTime,
+        timestamp: new Date().toISOString()
+      });
+      
       // Notify both users about the match
       socket.emit('matched', partnerId);
       partnerSocket.emit('matched', userId);
+      
+      console.log(`Connection established between ${userId} and ${partnerId}`);
+      console.log(`Active connections: ${activeConnections.size / 2} pairs`);
     } else {
       // No partners available, add to waiting list
       waitingUsers.set(userId, {
         socket: socket,
         timestamp: Date.now(),
-        priority: priority
+        priority: 'high' // Always use high priority
       });
       console.log(`User ${userId} added to waiting list. Waiting users: ${waitingUsers.size}`);
     }
@@ -120,6 +148,7 @@ io.on('connection', (socket) => {
     const targetSocket = getSocketByUserId(data.to);
     if (targetSocket) {
       targetSocket.emit('webrtc_offer', data);
+      console.log(`Forwarded WebRTC offer to ${data.to}`);
     } else {
       console.log(`Target user ${data.to} not found for WebRTC offer`);
     }
@@ -132,14 +161,21 @@ io.on('connection', (socket) => {
     const targetSocket = getSocketByUserId(data.to);
     if (targetSocket) {
       targetSocket.emit('webrtc_answer', data);
+      console.log(`Forwarded WebRTC answer to ${data.to}`);
+      
+      // Log successful connection
+      connectionLog.set(`${data.from}_${data.to}_answer_${Date.now()}`, {
+        event: 'webrtc_answer_sent',
+        from: data.from,
+        to: data.to,
+        timestamp: new Date().toISOString()
+      });
     } else {
       console.log(`Target user ${data.to} not found for WebRTC answer`);
     }
   });
   
   socket.on('webrtc_ice_candidate', (data) => {
-    console.log(`Received ICE candidate from ${data.from} to ${data.to}`);
-    
     // Forward ICE candidate to the target user
     const targetSocket = getSocketByUserId(data.to);
     if (targetSocket) {
@@ -167,6 +203,7 @@ io.on('connection', (socket) => {
       
       if (partnerSocket) {
         partnerSocket.emit('user_message', message);
+        console.log(`Message forwarded from ${to} to ${partnerId}`);
       } else {
         console.log(`Partner socket not found for ${partnerId}`);
       }
@@ -184,6 +221,7 @@ io.on('connection', (socket) => {
     
     // If user was waiting, remove from waiting list
     if (waitingUsers.has(disconnectedUserId)) {
+      console.log(`Removing disconnected user ${disconnectedUserId} from waiting list`);
       waitingUsers.delete(disconnectedUserId);
     }
     
@@ -192,9 +230,20 @@ io.on('connection', (socket) => {
       const partnerId = activeConnections.get(disconnectedUserId);
       const partnerSocket = getSocketByUserId(partnerId);
       
+      console.log(`User ${disconnectedUserId} disconnected while connected to ${partnerId}`);
+      
       if (partnerSocket) {
         partnerSocket.emit('partner_disconnected');
+        console.log(`Notified partner ${partnerId} of disconnection`);
       }
+      
+      // Log the disconnection
+      connectionLog.set(`${disconnectedUserId}_${partnerId}_disconnect_${Date.now()}`, {
+        event: 'socket_disconnect',
+        user: disconnectedUserId,
+        partner: partnerId,
+        timestamp: new Date().toISOString()
+      });
       
       activeConnections.delete(disconnectedUserId);
       activeConnections.delete(partnerId);
@@ -202,6 +251,19 @@ io.on('connection', (socket) => {
     
     // Update waiting count
     emitWaitingCount();
+  });
+  
+  // Periodically log connection stats
+  const statsInterval = setInterval(() => {
+    console.log(`===== CONNECTION STATS =====`);
+    console.log(`Waiting users: ${waitingUsers.size}`);
+    console.log(`Active connections: ${activeConnections.size / 2} pairs`);
+    console.log(`Connection log entries: ${connectionLog.size}`);
+    console.log(`============================`);
+  }, 30000); // Every 30 seconds
+  
+  socket.on('disconnect', () => {
+    clearInterval(statsInterval);
   });
 });
 
