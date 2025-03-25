@@ -482,6 +482,25 @@ const SolmegleChat: React.FC = () => {
       
       peerConnection.addEventListener('icecandidateerror', (event) => {
         console.error('ICE candidate error:', event);
+        
+        // Add better error handling for different types of ICE errors
+        // @ts-ignore - accessing properties that might not be in the type definition
+        const errorCode = event.errorCode || event.errorText;
+        // @ts-ignore
+        const hostCandidate = event.hostCandidate;
+        // @ts-ignore
+        const url = event.url;
+        
+        if (errorCode === 701 || (event.errorText && event.errorText.includes("STUN allocate failed"))) {
+          console.log("STUN server unreachable, trying alternative servers");
+          // Will automatically try other servers, no action needed
+        } else if (errorCode === 702 || (event.errorText && event.errorText.includes("TURN allocate failed"))) {
+          console.log("TURN server auth failed or server unreachable, trying alternatives");
+          // Will automatically try other servers, no action needed
+        }
+        
+        // Don't show error to user for ICE candidate errors
+        // These are common and usually don't affect the connection if we have other candidates
       });
       
       peerConnection.addEventListener('iceconnectionstatechange', () => {
@@ -809,23 +828,52 @@ const SolmegleChat: React.FC = () => {
   const handleStartNewChat = () => {
     console.log("Starting new chat");
     
-    // First clean up existing connection
-    cleanupPeerConnection();
+    // Set status first for immediate user feedback
+    setConnectionStatus("Searching for partner...");
     
-    // Reset state
+    // Cancel any active timeouts
+    if (connectionTimeoutRef.current) {
+      clearTimeout(connectionTimeoutRef.current);
+      connectionTimeoutRef.current = null;
+    }
+    
+    // Reset state EXCEPT for camera state
     setIsSearchingForPartner(true);
     setIsRealPartner(false);
     setMessages([]);
     setIsActiveConnection(false);
     setIsConnecting(true);
-    setConnectionStatus("Searching for partner...");
-    setCurrentVideoId(null);
+    
+    // Don't reset current video, just transition to searching indicator
+    // setCurrentVideoId(null);
+    
+    // Clean up existing WebRTC connection but PRESERVE local video
+    if (peerConnectionRef.current) {
+      // Don't stop local media tracks, only close the peer connection
+      try {
+        peerConnectionRef.current.ontrack = null;
+        peerConnectionRef.current.onicecandidate = null;
+        peerConnectionRef.current.onconnectionstatechange = null;
+        peerConnectionRef.current.oniceconnectionstatechange = null;
+        
+        // Close the connection but DON'T stop local tracks
+        peerConnectionRef.current.close();
+        peerConnectionRef.current = null;
+        
+        // Clear the stranger video ONLY
+        if (strangerVideoRef.current) {
+          strangerVideoRef.current.srcObject = null;
+        }
+        
+        console.log('WebRTC peer connection cleaned up (preserved local tracks)');
+      } catch (err) {
+        console.error('Error while cleaning up peer connection:', err);
+      }
+    }
     
     // Connect to new partner
-    if (partnerId) {
-      connectToPartner(partnerId, true);
-    } else if (socketRef.current) {
-      // If no partnerId yet, find a new partner
+    if (socketRef.current) {
+      // Find a new partner
       findPartner(socketRef.current);
     }
   };
@@ -905,6 +953,7 @@ const SolmegleChat: React.FC = () => {
             disablePictureInPicture
             controlsList="nodownload nofullscreen noremoteplayback"
           />
+          <SolmegleWatermark>Solmegle</SolmegleWatermark>
           <LiveIndicator>LIVE</LiveIndicator>
         </VideoContainer>
       );
@@ -1637,7 +1686,7 @@ const SendButton = styled.button`
 const SolmegleWatermark = styled.div`
   position: absolute;
   bottom: 10px;
-  right: 10px;
+  left: 10px;
   color: #ff6600;
   font-size: 1.5rem;
   font-weight: 700;
