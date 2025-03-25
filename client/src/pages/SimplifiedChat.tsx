@@ -880,22 +880,29 @@ const SolmegleChat: React.FC = () => {
     }
   };
 
-  // Start new chat with another partner
-  const startNewChat = () => {
+  // Handle starting a new chat with a different partner
+  const handleStartNewChat = () => {
     console.log("Starting new chat");
     
-    // Clear messages and reset state
+    // First clean up existing connection
+    cleanupPeerConnection();
+    
+    // Reset state
+    setIsSearchingForPartner(true);
+    setIsRealPartner(false);
     setMessages([]);
-    
-    // Clean up existing connection
-    handlePartnerDisconnect();
-    
-    // Set as not searching initially (will set to true in connectToPartner)
-    setIsSearchingForPartner(false);
-    setConnectionStatus("Click 'New Chat' to find a partner");
+    setIsActiveConnection(false);
+    setIsConnecting(true);
+    setConnectionStatus("Searching for partner...");
+    setCurrentVideoId(null);
     
     // Connect to new partner
-    connectToPartner(partnerId, true);
+    if (partnerId) {
+      connectToPartner(partnerId, true);
+    } else if (socketRef.current) {
+      // If no partnerId yet, find a new partner
+      findPartner(socketRef.current);
+    }
   };
 
   // Stop searching for partners
@@ -1421,6 +1428,33 @@ const SolmegleChat: React.FC = () => {
     };
   }, [cleanupPeerConnection]);
 
+  // Handle matched event for new partner
+  const handleMatchedEvent = useCallback((data: any) => {
+    console.log("MATCHED event received with data:", data);
+    
+    // Extract the matched partner's ID
+    const matchedPartnerId = data.partnerId;
+    
+    if (!matchedPartnerId) {
+      console.error("Received matched event without valid partnerId");
+      return;
+    }
+    
+    // Set that we have a real partner now
+    setIsRealPartner(true);
+    setIsSearchingForPartner(false);
+    setConnectionStatus("Connected to a partner!");
+    
+    // Set the partner ID and clear any existing messages
+    setPartnerId(matchedPartnerId);
+    setMessages([]);
+    
+    // Now create the new connection with small delay to allow state to settle
+    setTimeout(() => {
+      connectToPartner(matchedPartnerId, true);
+    }, 500);
+  }, [connectToPartner, setIsRealPartner, setIsSearchingForPartner, setPartnerId]);
+
   return (
     <>
       <Header />
@@ -1474,7 +1508,7 @@ const SolmegleChat: React.FC = () => {
               <SendButton onClick={sendMessage} disabled={!isRealPartner}>Send</SendButton>
             </ChatInputArea>
             <BottomControls>
-              <ControlButton primary onClick={startNewChat}>New Chat</ControlButton>
+              <ControlButton primary onClick={handleStartNewChat}>New Chat</ControlButton>
             </BottomControls>
           </RightSection>
         </MainContainer>
