@@ -910,6 +910,14 @@ const SolmegleChat: React.FC = () => {
       connectionTimeoutRef.current = null;
     }
     
+    // Notify partner that we're starting a new chat (if we have a connected partner)
+    if (socketRef.current && partnerIdRef.current && isRealPartner) {
+      console.log("Notifying partner about new chat");
+      socketRef.current.emit("start_new_chat", {
+        partnerId: partnerIdRef.current
+      });
+    }
+    
     // Reset state EXCEPT for camera state
     setIsSearchingForPartner(true);
     setIsRealPartner(false);
@@ -1161,6 +1169,9 @@ const SolmegleChat: React.FC = () => {
         setIsActiveConnection(true);
         setIsConnecting(true);
         setIsSearchingForPartner(false); // Stop searching once matched
+        
+        // Clear all messages for a new chat session
+        setMessages([]);
 
         // Since we found a real partner, clear any timeout for video fallback
         if (partnerConnectionTimeout.current) {
@@ -1544,6 +1555,40 @@ const SolmegleChat: React.FC = () => {
       newSocket.on("user_message", (message: string) => {
         console.log("Received message:", message);
         setMessages(prev => [...prev, { text: message, isUser: false }]);
+      });
+
+      // Add new event for partner starting a new chat
+      newSocket.on("partner_start_new", () => {
+        console.log("Partner clicked New Chat, showing static video");
+        
+        // Show static video
+        setIsSearchingForPartner(true);
+        setIsRealPartner(false);
+        
+        // Clean up PeerConnection but don't stop local video
+        if (peerConnectionRef.current) {
+          try {
+            peerConnectionRef.current.ontrack = null;
+            peerConnectionRef.current.onicecandidate = null;
+            peerConnectionRef.current.onconnectionstatechange = null;
+            peerConnectionRef.current.oniceconnectionstatechange = null;
+            
+            // Close the connection but DON'T stop local tracks
+            peerConnectionRef.current.close();
+            peerConnectionRef.current = null;
+            
+            // Clear the stranger video
+            if (strangerVideoRef.current) {
+              strangerVideoRef.current.srcObject = null;
+            }
+            
+            console.log('WebRTC peer connection closed due to partner starting new chat');
+          } catch (err) {
+            console.error('Error while cleaning up peer connection:', err);
+          }
+        }
+        
+        setConnectionStatus("Your partner started a new chat.");
       });
     }
   }, [cleanupPeerConnection, connectToPartner, findPartner, handlePartnerDisconnect, isActiveConnection, isConnecting, isRealPartner, isSearchingForPartner, partnerId, requestCameraAccess, setUserId]);

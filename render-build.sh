@@ -243,6 +243,34 @@ io.on('connection', (socket) => {
     emitWaitingCount();
   });
   
+  // Handle start_new_chat event from a user
+  socket.on('start_new_chat', (data) => {
+    console.log(`User ${socket.id} wants to start a new chat, notifying partner`);
+    
+    if (!data || !data.partnerId) {
+      console.log(`Invalid start_new_chat data from ${socket.id}:`, data);
+      return;
+    }
+    
+    const partnerId = data.partnerId;
+    const partnerSocket = getSocketByUserId(partnerId);
+    
+    if (partnerSocket) {
+      console.log(`Notifying partner ${partnerId} that the chat has been reset`);
+      // Send the partner_start_new event to the partner
+      partnerSocket.emit('partner_start_new');
+      
+      // Remove their active connection if it exists
+      cleanupConnection(socket.id, partnerId);
+    } else {
+      console.log(`Partner socket ${partnerId} not found for new chat notification`);
+    }
+    
+    // Remove from waiting and active connections
+    waitingUsers.delete(socket.id);
+    cleanupUserConnections(socket.id);
+  });
+  
   // WebRTC signaling handlers
   socket.on('webrtc_offer', (data) => {
     if (!data || !data.to) {
