@@ -81,6 +81,8 @@ const SolmegleChat: React.FC = () => {
   const partnerIdRef = useRef<string | null>(null);
   const [isConnectedToPartner, setIsConnectedToPartner] = useState<boolean>(false);
   const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingIceCandidatesRef = useRef<RTCIceCandidate[]>([]);
+  const remoteDescriptionSetRef = useRef<boolean>(false);
 
   // WebRTC helper functions
   const cleanupPeerConnection = useCallback(() => {
@@ -1131,9 +1133,47 @@ const SolmegleChat: React.FC = () => {
         }
         
         try {
+          // Check the connection state to avoid errors
+          const currentState = peerConnectionRef.current.signalingState;
+          if (currentState !== 'stable' && currentState !== 'have-local-offer') {
+            console.log(`Cannot set remote offer in state: ${currentState}, attempting to reset connection`);
+            
+            try {
+              // Try to reset the connection state if possible
+              if (currentState === 'have-remote-offer') {
+                console.log("Already have a remote offer, creating rollback");
+                await peerConnectionRef.current.setLocalDescription({type: 'rollback'} as RTCSessionDescription);
+              }
+            } catch (err) {
+              console.error("Error resetting connection state:", err);
+              // In case of error, clean up and create a new connection
+              cleanupPeerConnection();
+              connectToPartner(data.from, false);
+              return;
+            }
+          }
+          
           // Set the remote description from the offer
           await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
           console.log("Set remote description from offer");
+          remoteDescriptionSetRef.current = true;
+          
+          // Process any pending ICE candidates now
+          if (pendingIceCandidatesRef.current.length > 0) {
+            console.log(`Processing ${pendingIceCandidatesRef.current.length} pending ICE candidates after offer`);
+            
+            for (const candidate of pendingIceCandidatesRef.current) {
+              try {
+                await peerConnectionRef.current.addIceCandidate(candidate);
+                console.log("Successfully added pending ICE candidate after offer");
+              } catch (err) {
+                console.error("Error adding pending ICE candidate after offer:", err);
+              }
+            }
+            
+            // Clear the pending candidates
+            pendingIceCandidatesRef.current = [];
+          }
           
           // Create an answer
           const answer = await peerConnectionRef.current.createAnswer();
@@ -1152,7 +1192,8 @@ const SolmegleChat: React.FC = () => {
             console.error("Socket not connected, cannot send answer");
           }
         } catch (err) {
-          console.error("Error creating/sending answer:", err);
+          console.error("Error handling WebRTC offer:", err);
+          setConnectionStatus(`Connection error. Try 'New Chat'.`);
         }
       };
 
@@ -1173,7 +1214,25 @@ const SolmegleChat: React.FC = () => {
           
           await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
           console.log("Successfully set remote description from answer");
+          remoteDescriptionSetRef.current = true;
           setConnectionStatus("Connected to partner");
+          
+          // Process any pending ICE candidates now that remote description is set
+          if (pendingIceCandidatesRef.current.length > 0) {
+            console.log(`Processing ${pendingIceCandidatesRef.current.length} pending ICE candidates after answer`);
+            
+            for (const candidate of pendingIceCandidatesRef.current) {
+              try {
+                await peerConnectionRef.current.addIceCandidate(candidate);
+                console.log("Successfully added pending ICE candidate after answer");
+              } catch (err) {
+                console.error("Error adding pending ICE candidate after answer:", err);
+              }
+            }
+            
+            // Clear the pending candidates
+            pendingIceCandidatesRef.current = [];
+          }
         } catch (err) {
           console.error("Error handling WebRTC answer:", err);
           setConnectionStatus(`Connection issue. Try 'New Chat'.`);
@@ -1189,15 +1248,48 @@ const SolmegleChat: React.FC = () => {
           return;
         }
         
+        // Create the ICE candidate object
+        const candidate = new RTCIceCandidate(data.candidate);
+        
         if (peerConnectionRef.current) {
           try {
-            await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
-            console.log("Added ICE candidate successfully");
+            // Check if remote description is set
+            if (peerConnectionRef.current.remoteDescription && 
+                peerConnectionRef.current.remoteDescription !== null) {
+              
+              // Remote description is set, add candidate directly
+              await peerConnectionRef.current.addIceCandidate(candidate);
+              console.log("Added ICE candidate successfully");
+              remoteDescriptionSetRef.current = true;
+              
+              // If we have pending candidates, add them now
+              if (pendingIceCandidatesRef.current.length > 0) {
+                console.log(`Adding ${pendingIceCandidatesRef.current.length} pending ICE candidates`);
+                
+                // Process all pending candidates
+                for (const pendingCandidate of pendingIceCandidatesRef.current) {
+                  try {
+                    await peerConnectionRef.current.addIceCandidate(pendingCandidate);
+                    console.log("Added pending ICE candidate successfully");
+                  } catch (err) {
+                    console.error("Error adding pending ICE candidate:", err);
+                  }
+                }
+                
+                // Clear pending candidates
+                pendingIceCandidatesRef.current = [];
+              }
+            } else {
+              // Remote description not set yet, store candidate for later
+              console.log("Remote description not set yet, storing ICE candidate for later");
+              pendingIceCandidatesRef.current.push(candidate);
+            }
           } catch (error) {
             console.error("Error adding ICE candidate:", error);
           }
         } else {
           console.warn("Cannot add ICE candidate: No peer connection available");
+          pendingIceCandidatesRef.current.push(candidate);
         }
       });
 
@@ -1545,7 +1637,7 @@ const SendButton = styled.button`
 const SolmegleWatermark = styled.div`
   position: absolute;
   bottom: 10px;
-  left: 10px;
+  right: 10px;
   color: #ff6600;
   font-size: 1.5rem;
   font-weight: 700;
