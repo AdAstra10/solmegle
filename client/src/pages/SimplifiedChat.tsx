@@ -373,13 +373,270 @@ const SolmegleChat: React.FC = () => {
     }
   }, [userId]);
 
+  // Create a WebRTC peer connection with better track handling
+  const createPeerConnection = useCallback((isInitiator: boolean): RTCPeerConnection | null => {
+    console.log(`Creating peer connection as ${isInitiator ? 'initiator' : 'receiver'}`);
+    
+    // CRITICAL FIX: Ensure we have active media tracks before creating connection
+    if (!userStreamRef.current) {
+      console.error('No local stream available, cannot create peer connection');
+      
+      // Try to request camera access again
+      requestCameraAccess()
+        .then(() => {
+          console.log('Camera access granted after retry in createPeerConnection');
+          // Let the socket handler retry peer connection creation
+        })
+        .catch(err => {
+          console.error('Failed to get camera tracks after access granted:', err);
+          setErrorMessage('Camera access required to chat. Please allow camera and refresh.');
+        });
+      
+      return null;
+    }
+    
+    // Verify we have valid tracks
+    const videoTracks = userStreamRef.current.getVideoTracks();
+    const audioTracks = userStreamRef.current.getAudioTracks();
+    
+    if (videoTracks.length === 0) {
+      console.error('No video tracks available in local stream');
+      setErrorMessage('No video available. Please check your camera settings and refresh.');
+      return null;
+    }
+    
+    if (audioTracks.length === 0) {
+      console.warn('No audio tracks available in local stream, continuing with video only');
+    }
+    
+    // Log active track information
+    console.log(`Creating peer with ${videoTracks.length} video tracks and ${audioTracks.length} audio tracks`);
+    videoTracks.forEach(track => {
+      console.log(`Video track: ${track.label}, state: ${track.readyState}, enabled: ${track.enabled}`);
+    });
+    audioTracks.forEach(track => {
+      console.log(`Audio track: ${track.label}, state: ${track.readyState}, enabled: ${track.enabled}`);
+    });
+    
+    // Create and configure the peer connection
+    try {
+      // STUN and TURN server configuration
+      const iceServers = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
+      ];
+      
+      const peerConnection = new RTCPeerConnection({
+        iceServers,
+        iceTransportPolicy: 'all' as RTCIceTransportPolicy,
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require'
+      });
+      
+      // Add event listeners for debugging
+      peerConnection.addEventListener('negotiationneeded', (event) => {
+        console.log('Negotiation needed event triggered', event);
+      });
+      
+      peerConnection.addEventListener('icecandidate', (event) => {
+        if (event.candidate) {
+          console.log('ICE candidate generated:', event.candidate.candidate);
+          
+          // Send the ICE candidate to the peer
+          if (socketRef.current && partnerIdRef.current) {
+            socketRef.current.emit('ice_candidate', {
+              to: partnerIdRef.current,
+              candidate: event.candidate
+            });
+          }
+        } else {
+          console.log('ICE gathering complete');
+        }
+      });
+      
+      peerConnection.addEventListener('icecandidateerror', (event) => {
+        console.error('ICE candidate error:', event);
+      });
+      
+      peerConnection.addEventListener('iceconnectionstatechange', () => {
+        console.log('ICE connection state changed to:', peerConnection.iceConnectionState);
+        
+        // Handle disconnected, failed, or closed states
+        if (peerConnection.iceConnectionState === 'disconnected' ||
+            peerConnection.iceConnectionState === 'failed' ||
+            peerConnection.iceConnectionState === 'closed') {
+          
+          console.log('ICE connection problematic:', peerConnection.iceConnectionState);
+          
+          // If connection failed, try to recover
+          if (peerConnection.iceConnectionState === 'failed') {
+            console.log('Connection failed, attempting to restart ICE');
+            
+            try {
+              // Try to restart ICE gathering
+              peerConnection.restartIce();
+            } catch (err) {
+              console.error('Error restarting ICE:', err);
+            }
+          }
+        }
+      });
+      
+      peerConnection.addEventListener('connectionstatechange', () => {
+        console.log('Connection state changed to:', peerConnection.connectionState);
+        
+        // Handle disconnected or failed states
+        if (peerConnection.connectionState === 'disconnected' ||
+            peerConnection.connectionState === 'failed' ||
+            peerConnection.connectionState === 'closed') {
+          
+          console.log('Connection state problematic:', peerConnection.connectionState);
+          
+          // Notify user that connection might be unstable
+          setErrorMessage('Connection unstable. You may need to refresh if video freezes.');
+          
+          // If failed completely, clean up
+          if (peerConnection.connectionState === 'failed') {
+            cleanupPeerConnection();
+          }
+        } else if (peerConnection.connectionState === 'connected') {
+          console.log('Successfully connected to peer!');
+          setErrorMessage('');
+        }
+      });
+      
+      peerConnection.addEventListener('track', (event) => {
+        console.log(`Remote track added: ${event.track.kind}`, event.streams);
+        
+        if (event.streams && event.streams[0]) {
+          console.log('Setting remote stream from track event');
+          
+          // Display the remote video
+          if (strangerVideoRef.current) {
+            strangerVideoRef.current.srcObject = event.streams[0];
+            
+            strangerVideoRef.current.onloadedmetadata = () => {
+              console.log('Remote video metadata loaded, playing...');
+              
+              strangerVideoRef.current!.play()
+                .then(() => {
+                  console.log('Remote video playing successfully');
+                })
+                .catch(err => {
+                  console.error('Error playing remote video:', err);
+                  
+                  // If autoplay is blocked, try with muted
+                  if (err.name === 'NotAllowedError') {
+                    console.log('Autoplay blocked, trying with muted');
+                    strangerVideoRef.current!.muted = true;
+                    
+                    strangerVideoRef.current!.play()
+                      .then(() => {
+                        console.log('Remote video playing with muted workaround');
+                        // Unmute after starting playback if this is partner video
+                        setTimeout(() => {
+                          if (strangerVideoRef.current) {
+                            strangerVideoRef.current.muted = false;
+                            console.log('Unmuted partner video after autoplay fix');
+                          }
+                        }, 1000);
+                      })
+                      .catch(playErr => {
+                        console.error('Failed to play remote video even with muted:', playErr);
+                      });
+                  }
+                });
+            };
+          } else {
+            console.warn('Partner video element not available');
+          }
+        } else {
+          console.warn('No streams array in track event');
+        }
+      });
+      
+      // Add all local tracks to the peer connection
+      try {
+        if (userStreamRef.current) {
+          userStreamRef.current.getTracks().forEach(track => {
+            try {
+              if (track.readyState === 'live') {
+                console.log(`Adding ${track.kind} track to peer connection: ${track.label}`);
+                peerConnection.addTrack(track, userStreamRef.current!);
+              } else {
+                console.warn(`Track ${track.kind} not in live state, attempting to fix`);
+                
+                // Try to get a new track if not in live state
+                if (track.kind === 'video') {
+                  navigator.mediaDevices.getUserMedia({ video: true })
+                    .then(tempStream => {
+                      const newTrack = tempStream.getVideoTracks()[0];
+                      if (newTrack) {
+                        console.log('Adding replacement video track');
+                        peerConnection.addTrack(newTrack, userStreamRef.current!);
+                        
+                        // Stop the temporary stream's other tracks
+                        tempStream.getTracks().forEach(t => {
+                          if (t !== newTrack) t.stop();
+                        });
+                      }
+                    })
+                    .catch(err => console.error('Failed to get replacement video track:', err));
+                }
+                
+                if (track.kind === 'audio') {
+                  navigator.mediaDevices.getUserMedia({ audio: true })
+                    .then(tempStream => {
+                      const newTrack = tempStream.getAudioTracks()[0];
+                      if (newTrack) {
+                        console.log('Adding replacement audio track');
+                        peerConnection.addTrack(newTrack, userStreamRef.current!);
+                        
+                        // Stop the temporary stream's other tracks
+                        tempStream.getTracks().forEach(t => {
+                          if (t !== newTrack) t.stop();
+                        });
+                      }
+                    })
+                    .catch(err => console.error('Failed to get replacement audio track:', err));
+                }
+              }
+            } catch (err) {
+              console.error(`Error adding ${track.kind} track to peer connection:`, err);
+            }
+          });
+        }
+      } catch (err) {
+        console.error('Error adding tracks to peer connection:', err);
+      }
+      
+      // Set connection reference for later use
+      peerConnectionRef.current = peerConnection;
+      return peerConnection;
+    } catch (err) {
+      console.error('Error creating peer connection:', err);
+      setErrorMessage('Failed to create connection. Please refresh and try again.');
+      return null;
+    }
+  }, [requestCameraAccess, setErrorMessage, cleanupPeerConnection]);
+
   // Connect to a partner with enhanced signaling and error handling
-  const connectToPartner = useCallback(async (partnerId: string, isInitiator: boolean) => {
-    console.log(`Connecting to partner ${partnerId} as ${isInitiator ? 'initiator' : 'receiver'}`);
+  const connectToPartner = useCallback(async (partnerIdToConnect: string, isInitiator: boolean) => {
+    console.log(`Connecting to partner ${partnerIdToConnect} as ${isInitiator ? 'initiator' : 'receiver'}`);
     
     // Save partner ID for reference
-    partnerIdRef.current = partnerId;
-    setPartnerId(partnerId);
+    partnerIdRef.current = partnerIdToConnect;
+    setPartnerId(partnerIdToConnect);
     
     // Make sure we have a valid socket connection
     if (!socketRef.current || !socketRef.current.connected) {
@@ -455,7 +712,7 @@ const SolmegleChat: React.FC = () => {
         
         console.log('Sending offer to partner');
         socketRef.current.emit('offer', {
-          to: partnerId,
+          to: partnerIdToConnect,
           offer: peerConnection.localDescription
         });
         
@@ -510,7 +767,7 @@ const SolmegleChat: React.FC = () => {
         
         // Send the answer back to the partner
         socketRef.current!.emit('answer', {
-          to: partnerId,
+          to: partnerIdToConnect,
           answer: peerConnectionRef.current.localDescription
         });
         
@@ -595,267 +852,6 @@ const SolmegleChat: React.FC = () => {
     setIsConnectedToPartner,
     setPartnerId
   ]);
-
-  // Create a WebRTC peer connection with better track handling
-  const createPeerConnection = useCallback((isInitiator: boolean): RTCPeerConnection | null => {
-    console.log(`Creating peer connection as ${isInitiator ? 'initiator' : 'receiver'}`);
-    
-    // CRITICAL FIX: Ensure we have active media tracks before creating connection
-    if (!userStreamRef.current) {
-      console.error('No local stream available, cannot create peer connection');
-      
-      // Try to request camera access again
-      requestCameraAccess()
-        .then(() => {
-          console.log('Camera access granted after retry in createPeerConnection');
-          // Let the socket handler retry peer connection creation
-        })
-        .catch(err => {
-          console.error('Failed to get camera tracks after access granted:', err);
-          setErrorMessage('Camera access required to chat. Please allow camera and refresh.');
-        });
-      
-      return null;
-    }
-    
-    // Verify we have valid tracks
-    const videoTracks = userStreamRef.current.getVideoTracks();
-    const audioTracks = userStreamRef.current.getAudioTracks();
-    
-    if (videoTracks.length === 0) {
-      console.error('No video tracks available in local stream');
-      setErrorMessage('No video available. Please check your camera settings and refresh.');
-      return null;
-    }
-    
-    if (audioTracks.length === 0) {
-      console.warn('No audio tracks available in local stream, continuing with video only');
-    }
-    
-    // Log active track information
-    console.log(`Creating peer with ${videoTracks.length} video tracks and ${audioTracks.length} audio tracks`);
-    videoTracks.forEach(track => {
-      console.log(`Video track: ${track.label}, state: ${track.readyState}, enabled: ${track.enabled}`);
-    });
-    audioTracks.forEach(track => {
-      console.log(`Audio track: ${track.label}, state: ${track.readyState}, enabled: ${track.enabled}`);
-    });
-    
-    // Create and configure the peer connection
-    try {
-      // STUN and TURN server configuration
-      const iceServers = [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        {
-          urls: 'turn:openrelay.metered.ca:80',
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443',
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        }
-      ];
-      
-      const peerConnection = new RTCPeerConnection({
-        iceServers,
-        iceTransportPolicy: 'all' as RTCIceTransportPolicy,
-        bundlePolicy: 'max-bundle',
-        rtcpMuxPolicy: 'require',
-        sdpSemantics: 'unified-plan'
-      });
-      
-      // Add event listeners for debugging
-      peerConnection.addEventListener('negotiationneeded', (event) => {
-        console.log('Negotiation needed event triggered', event);
-      });
-      
-      peerConnection.addEventListener('icecandidate', (event) => {
-        if (event.candidate) {
-          console.log('ICE candidate generated:', event.candidate.candidate);
-          
-          // Send the ICE candidate to the peer
-          if (socketRef.current) {
-            socketRef.current.emit('ice_candidate', {
-              to: partnerId,
-              candidate: event.candidate
-            });
-          }
-        } else {
-          console.log('ICE gathering complete');
-        }
-      });
-      
-      peerConnection.addEventListener('icecandidateerror', (event) => {
-        console.error('ICE candidate error:', event);
-      });
-      
-      peerConnection.addEventListener('iceconnectionstatechange', () => {
-        console.log('ICE connection state changed to:', peerConnection.iceConnectionState);
-        
-        // Handle disconnected, failed, or closed states
-        if (peerConnection.iceConnectionState === 'disconnected' ||
-            peerConnection.iceConnectionState === 'failed' ||
-            peerConnection.iceConnectionState === 'closed') {
-          
-          console.log('ICE connection problematic:', peerConnection.iceConnectionState);
-          
-          // If connection failed, try to recover
-          if (peerConnection.iceConnectionState === 'failed') {
-            console.log('Connection failed, attempting to restart ICE');
-            
-            try {
-              // Try to restart ICE gathering
-              peerConnection.restartIce();
-            } catch (err) {
-              console.error('Error restarting ICE:', err);
-            }
-          }
-        }
-      });
-      
-      peerConnection.addEventListener('connectionstatechange', () => {
-        console.log('Connection state changed to:', peerConnection.connectionState);
-        
-        // Handle disconnected or failed states
-        if (peerConnection.connectionState === 'disconnected' ||
-            peerConnection.connectionState === 'failed' ||
-            peerConnection.connectionState === 'closed') {
-          
-          console.log('Connection state problematic:', peerConnection.connectionState);
-          
-          // Notify user that connection might be unstable
-          setErrorMessage('Connection unstable. You may need to refresh if video freezes.');
-          
-          // If failed completely, clean up
-          if (peerConnection.connectionState === 'failed') {
-            cleanupPeerConnection();
-          }
-        } else if (peerConnection.connectionState === 'connected') {
-          console.log('Successfully connected to peer!');
-          setErrorMessage('');
-        }
-      });
-      
-      peerConnection.addEventListener('track', (event) => {
-        console.log(`Remote track added: ${event.track.kind}`, event.streams);
-        
-        if (event.streams && event.streams[0]) {
-          console.log('Setting remote stream from track event');
-          
-          // Set the remote stream
-          peerConnectionRef.current = event.streams[0];
-          
-          // Display the remote video
-          if (strangerVideoRef.current) {
-            strangerVideoRef.current.srcObject = event.streams[0];
-            
-            strangerVideoRef.current.onloadedmetadata = () => {
-              console.log('Remote video metadata loaded, playing...');
-              
-              strangerVideoRef.current!.play()
-                .then(() => {
-                  console.log('Remote video playing successfully');
-                })
-                .catch(err => {
-                  console.error('Error playing remote video:', err);
-                  
-                  // If autoplay is blocked, try with muted
-                  if (err.name === 'NotAllowedError') {
-                    console.log('Autoplay blocked, trying with muted');
-                    strangerVideoRef.current!.muted = true;
-                    
-                    strangerVideoRef.current!.play()
-                      .then(() => {
-                        console.log('Remote video playing with muted workaround');
-                        // Unmute after starting playback if this is partner video
-                        setTimeout(() => {
-                          if (strangerVideoRef.current) {
-                            strangerVideoRef.current.muted = false;
-                            console.log('Unmuted partner video after autoplay fix');
-                          }
-                        }, 1000);
-                      })
-                      .catch(playErr => {
-                        console.error('Failed to play remote video even with muted:', playErr);
-                      });
-                  }
-                });
-            };
-          } else {
-            console.warn('Partner video element not available');
-          }
-        } else {
-          console.warn('No streams array in track event');
-        }
-      });
-      
-      // Add all local tracks to the peer connection
-      try {
-        if (userStreamRef.current) {
-          userStreamRef.current.getTracks().forEach(track => {
-            try {
-              if (track.readyState === 'live') {
-                console.log(`Adding ${track.kind} track to peer connection: ${track.label}`);
-                peerConnection.addTrack(track, userStreamRef.current!);
-              } else {
-                console.warn(`Track ${track.kind} not in live state, attempting to fix`);
-                
-                // Try to clone the track if not in live state
-                if (track.kind === 'video' && track.readyState !== 'live') {
-                  navigator.mediaDevices.getUserMedia({ video: true })
-                    .then(tempStream => {
-                      const newTrack = tempStream.getVideoTracks()[0];
-                      if (newTrack) {
-                        console.log('Adding replacement video track');
-                        peerConnection.addTrack(newTrack, userStreamRef.current!);
-                        
-                        // Stop the temporary stream's other tracks
-                        tempStream.getTracks().forEach(t => {
-                          if (t !== newTrack) t.stop();
-                        });
-                      }
-                    })
-                    .catch(err => console.error('Failed to get replacement video track:', err));
-                }
-                
-                if (track.kind === 'audio' && track.readyState !== 'live') {
-                  navigator.mediaDevices.getUserMedia({ audio: true })
-                    .then(tempStream => {
-                      const newTrack = tempStream.getAudioTracks()[0];
-                      if (newTrack) {
-                        console.log('Adding replacement audio track');
-                        peerConnection.addTrack(newTrack, userStreamRef.current!);
-                        
-                        // Stop the temporary stream's other tracks
-                        tempStream.getTracks().forEach(t => {
-                          if (t !== newTrack) t.stop();
-                        });
-                      }
-                    })
-                    .catch(err => console.error('Failed to get replacement audio track:', err));
-                }
-              }
-            } catch (err) {
-              console.error(`Error adding ${track.kind} track to peer connection:`, err);
-            }
-          });
-        }
-      } catch (err) {
-        console.error('Error adding tracks to peer connection:', err);
-      }
-      
-      // Set connection reference for later use
-      peerConnectionRef.current = peerConnection;
-      return peerConnection;
-    } catch (err) {
-      console.error('Error creating peer connection:', err);
-      setErrorMessage('Failed to create connection. Please refresh and try again.');
-      return null;
-    }
-  }, [requestCameraAccess, setErrorMessage, cleanupPeerConnection]);
 
   // Handle partner disconnection more robustly
   const handlePartnerDisconnect = () => {
@@ -1297,7 +1293,15 @@ const SolmegleChat: React.FC = () => {
             // Automatically connect to a partner as soon as camera is allowed
             if (mounted) {
               console.log("Camera access granted, automatically connecting to partner");
-              connectToPartner(partnerId, true);
+              // Only connect if we have a valid partner ID
+              if (partnerId) {
+                connectToPartner(partnerId, true);
+              } else {
+                // Start searching for a partner
+                if (socketRef.current) {
+                  findPartner(socketRef.current);
+                }
+              }
             }
           })
           .catch(error => {
@@ -1325,7 +1329,7 @@ const SolmegleChat: React.FC = () => {
         clearTimeout(retryTimeoutRef.current);
       }
     };
-  }, [requestCameraAccess, connectToPartner]);
+  }, [requestCameraAccess, connectToPartner, findPartner]);
 
   // Additional effect to handle camera stream when refs become available
   useEffect(() => {
@@ -1388,9 +1392,17 @@ const SolmegleChat: React.FC = () => {
   // Initiate a connection when the component mounts and camera access is granted
   useEffect(() => {
     if (isCameraAllowed && currentVideoId === null && !isSearchingForPartner) {
-      connectToPartner(partnerId, true);
+      // Only connect if we have a valid partner ID or start searching
+      if (partnerId) {
+        connectToPartner(partnerId, true);
+      } else {
+        // Start searching for a partner
+        if (socketRef.current) {
+          findPartner(socketRef.current);
+        }
+      }
     }
-  }, [isCameraAllowed, currentVideoId, isSearchingForPartner, connectToPartner]);
+  }, [isCameraAllowed, currentVideoId, isSearchingForPartner, connectToPartner, findPartner]);
 
   // Add useEffect to scroll to bottom of messages
   useEffect(() => {
