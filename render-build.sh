@@ -47,6 +47,13 @@ const PORT = process.env.PORT || 3000;
 // Serve static files
 app.use(express.static(path.join(__dirname)));
 
+// Add specific static file handling with proper content type
+app.get('/static/static.mp4', (req, res) => {
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 24 hours
+  res.sendFile(path.join(__dirname, 'static', 'static.mp4'));
+});
+
 // For any request that doesn't match a static file, serve index.html
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
@@ -405,6 +412,63 @@ setInterval(() => {
   console.log(`Active connections: ${activeConnections.size / 2} pairs`);
   console.log(`============================`);
 }, 30000);
+
+// Update the connection handling to be more reliable (after the WebSocket implementation section)
+// Helper function to clean up connections properly
+const cleanupConnection = (userId, partnerId) => {
+  console.log(`Cleaning up connection between ${userId} and ${partnerId}`);
+  
+  // Remove from active connections
+  activeConnections.delete(userId);
+  activeConnections.delete(partnerId);
+  
+  // Make sure both users are properly notified if needed
+  const userSocket = getSocketByUserId(userId);
+  const partnerSocket = getSocketByUserId(partnerId);
+  
+  // Ensure connections are reset on both sides
+  if (userSocket && userSocket.connected) {
+    // No need to notify the user who initiated the cleanup
+  }
+  
+  if (partnerSocket && partnerSocket.connected) {
+    // Already notified through partner_start_new
+  }
+};
+
+// Helper to clean up all connections for a user
+const cleanupUserConnections = (userId) => {
+  if (activeConnections.has(userId)) {
+    const partnerId = activeConnections.get(userId);
+    cleanupConnection(userId, partnerId);
+  }
+  
+  // Also remove from waiting users
+  waitingUsers.delete(userId);
+};
+
+// Make sure server has proper error handling (at the end before server.listen)
+// Add error handling for the server
+server.on('error', (error) => {
+  console.error('Server error:', error);
+});
+
+// Add graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, shutting down gracefully');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
 
 // Start server
 server.listen(PORT, () => {

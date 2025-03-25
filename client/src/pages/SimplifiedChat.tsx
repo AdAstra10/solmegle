@@ -901,6 +901,9 @@ const SolmegleChat: React.FC = () => {
   const handleStartNewChat = () => {
     console.log("Starting new chat");
     
+    // Clear messages immediately
+    setMessages([]);
+    
     // Set status first for immediate user feedback
     setConnectionStatus("Searching for partner...");
     
@@ -921,12 +924,8 @@ const SolmegleChat: React.FC = () => {
     // Reset state EXCEPT for camera state
     setIsSearchingForPartner(true);
     setIsRealPartner(false);
-    setMessages([]);
     setIsActiveConnection(false);
     setIsConnecting(true);
-    
-    // Don't reset current video, just transition to searching indicator
-    // setCurrentVideoId(null);
     
     // Clean up existing WebRTC connection but PRESERVE local video
     if (peerConnectionRef.current) {
@@ -952,10 +951,49 @@ const SolmegleChat: React.FC = () => {
       }
     }
     
-    // Connect to new partner
+    // Connect to new partner with connection check and retry
     if (socketRef.current) {
-      // Find a new partner
-      findPartner(socketRef.current);
+      if (socketRef.current.connected) {
+        // Find a new partner if connected
+        findPartner(socketRef.current);
+      } else {
+        console.log("Socket not connected, attempting to reconnect");
+        
+        // Attempt to reconnect the socket
+        socketRef.current.connect();
+        
+        // Set a timer to check connection and retry
+        setTimeout(() => {
+          if (socketRef.current && socketRef.current.connected) {
+            console.log("Socket reconnected, finding partner");
+            findPartner(socketRef.current);
+          } else {
+            console.log("Socket still disconnected, showing error");
+            setConnectionStatus("Connection to server lost. Trying to reconnect...");
+            
+            // Create a new socket connection if needed
+            const newSocket = io(window.location.origin, {
+              transports: ['websocket', 'polling'],
+              upgrade: true,
+              reconnection: true,
+              reconnectionAttempts: 15,
+              reconnectionDelay: 1000,
+              timeout: 20000
+            });
+            
+            socketRef.current = newSocket;
+            
+            // Set up handlers for the new connection
+            newSocket.on('connect', () => {
+              console.log("Socket reconnected with new ID:", newSocket.id);
+              setConnectionStatus("Reconnected! Searching for partner...");
+              
+              // Try to find a partner with the new connection
+              setTimeout(() => findPartner(newSocket), 500);
+            });
+          }
+        }, 1000);
+      }
     }
   };
 
@@ -1019,6 +1057,17 @@ const SolmegleChat: React.FC = () => {
             src="/static/static.mp4"
             disablePictureInPicture
             controlsList="nodownload nofullscreen noremoteplayback"
+            onError={(e) => {
+              console.log("Static video error, trying backup static content");
+              // If static.mp4 fails to load, show a black background with text
+              const videoElement = e.target as HTMLVideoElement;
+              if (videoElement) {
+                videoElement.style.backgroundColor = "#000000";
+                // Don't try to reload the failing video
+                videoElement.removeAttribute("src");
+                videoElement.load();
+              }
+            }}
           />
           <SolmegleWatermark>Solmegle</SolmegleWatermark>
           <ConnectionStatus>{connectionStatus}</ConnectionStatus>
@@ -1561,6 +1610,9 @@ const SolmegleChat: React.FC = () => {
       newSocket.on("partner_start_new", () => {
         console.log("Partner clicked New Chat, showing static video");
         
+        // Clear messages immediately
+        setMessages([]);
+        
         // Show static video
         setIsSearchingForPartner(true);
         setIsRealPartner(false);
@@ -1589,6 +1641,14 @@ const SolmegleChat: React.FC = () => {
         }
         
         setConnectionStatus("Your partner started a new chat.");
+        
+        // Initiate a new partner search after a short delay (if user hasn't already done so)
+        setTimeout(() => {
+          if (socketRef.current && socketRef.current.connected && isSearchingForPartner) {
+            console.log("Auto-initiating partner search after partner left");
+            findPartner(socketRef.current);
+          }
+        }, 500);
       });
     }
   }, [cleanupPeerConnection, connectToPartner, findPartner, handlePartnerDisconnect, isActiveConnection, isConnecting, isRealPartner, isSearchingForPartner, partnerId, requestCameraAccess, setUserId]);
