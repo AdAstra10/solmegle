@@ -483,18 +483,18 @@ const SolmegleChat: React.FC = () => {
       peerConnection.addEventListener('icecandidateerror', (event) => {
         console.error('ICE candidate error:', event);
         
-        // Add better error handling for different types of ICE errors
-        // @ts-ignore - accessing properties that might not be in the type definition
-        const errorCode = event.errorCode || event.errorText;
-        // @ts-ignore
-        const hostCandidate = event.hostCandidate;
-        // @ts-ignore
-        const url = event.url;
+        // Use proper type handling for icecandidateerror event 
+        // TypeScript doesn't know about all properties on this event
+        const errorEvent = event as any;
+        const errorCode = errorEvent.errorCode || 0;
+        const errorText = errorEvent.errorText || '';
+        const hostCandidate = errorEvent.hostCandidate || '';
+        const url = errorEvent.url || '';
         
-        if (errorCode === 701 || (event.errorText && event.errorText.includes("STUN allocate failed"))) {
+        if (errorCode === 701 || errorText.includes("STUN allocate failed")) {
           console.log("STUN server unreachable, trying alternative servers");
           // Will automatically try other servers, no action needed
-        } else if (errorCode === 702 || (event.errorText && event.errorText.includes("TURN allocate failed"))) {
+        } else if (errorCode === 702 || errorText.includes("TURN allocate failed")) {
           console.log("TURN server auth failed or server unreachable, trying alternatives");
           // Will automatically try other servers, no action needed
         }
