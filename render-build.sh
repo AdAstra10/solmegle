@@ -28,13 +28,18 @@ const path = require('path');
 const http = require('http');
 const socketIo = require('socket.io');
 
+// Create express app and server
 const app = express();
 const server = http.createServer(app);
+
+// Configure Socket.IO
 const io = socketIo(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
-  }
+  },
+  transports: ['websocket', 'polling'],
+  pingTimeout: 60000, // Increased timeout for more stable connections
 });
 
 const PORT = process.env.PORT || 3000;
@@ -49,12 +54,12 @@ app.get('*', (req, res) => {
 
 // WebSocket implementation for real-time user matching
 // Store waiting users and active connections
-const waitingUsers = new Map(); // userId -> {socket, timestamp, priority}
+const waitingUsers = new Map(); // userId -> {socket, timestamp}
 const activeConnections = new Map(); // userId -> partnerId
 const connectionLog = new Map(); // For debugging connections
-const connectionAttempts = new Map(); // userId -> {lastAttempt, count} - Tracking connection attempts to prevent spam
+const connectionAttempts = new Map(); // userId -> {lastAttempt, count}
 
-// Helper function to get a socket by user ID - simplified for reliability
+// Helper function to get a socket by user ID
 const getSocketByUserId = (userId) => {
   // Direct socket ID lookup is most reliable
   const socket = io.sockets.sockets.get(userId);
@@ -79,13 +84,13 @@ const getSocketByUserId = (userId) => {
   return null;
 };
 
-// Check for connection lockout to prevent rapid reconnection attempts
+// Rate limiting for connection attempts
 const isConnectionLocked = (userId) => {
   const now = Date.now();
   const lastAttempt = connectionAttempts.get(userId);
   
   if (lastAttempt) {
-    // If last attempt was less than 1 second ago, enforce lockout
+    // Lock if last attempt was within 1 second
     if (now - lastAttempt.timestamp < 1000) {
       console.log(`Connection attempt from ${userId} locked out - too frequent`);
       return true;
@@ -107,7 +112,7 @@ const isConnectionLocked = (userId) => {
 io.on('connection', (socket) => {
   console.log('New user connected:', socket.id);
   
-  // Store the socket ID as userId - using socket.id is more reliable
+  // Set socket ID as userId for reliable reference
   socket.userId = socket.id;
   
   // Log active users and connections for debugging
@@ -122,51 +127,38 @@ io.on('connection', (socket) => {
   // Update waiting count for all connected users
   const emitWaitingCount = () => {
     const count = waitingUsers.size;
-    console.log(`Broadcasting waiting count: ${count}`);
     io.emit('waiting_count', count);
   };
   
-  // Simplified find_partner with clearer matching logic
+  // Find partner handler
   socket.on('find_partner', (data, callback) => {
-    // Always use socket.id as userId for reliability
     const userId = socket.id;
-    
     console.log(`User ${userId} is looking for a partner`);
     
-    // Check for connection lockout to prevent rapid reconnection attempts
+    // Rate limit connection requests
     if (isConnectionLocked(userId)) {
-      console.log(`User ${userId} is sending find_partner requests too frequently - lockout applied`);
       if (typeof callback === 'function') {
         callback({ success: false, error: 'Too many connection attempts. Please wait a moment.' });
       }
       return;
     }
     
-    // Send acknowledgment if callback is provided
+    // Send acknowledgment if callback provided
     if (typeof callback === 'function') {
-      try {
-        callback({ success: true });
-        console.log(`Sent acknowledgment to ${userId} for find_partner request`);
-      } catch (err) {
-        console.error(`Error sending acknowledgment to ${userId}:`, err);
-      }
+      callback({ success: true });
     }
     
-    // Check if we're already trying to match this user with a partner
+    // Check if already connected to a partner
     if (activeConnections.has(userId)) {
       const existingPartnerId = activeConnections.get(userId);
       const existingPartnerSocket = getSocketByUserId(existingPartnerId);
       
       if (existingPartnerSocket && existingPartnerSocket.connected) {
-        console.log(`User ${userId} already matched with ${existingPartnerId} - not matching again`);
-        
-        // Inform the client they're already connected
+        console.log(`User ${userId} already matched with ${existingPartnerId}`);
         socket.emit('matched', existingPartnerId);
-        console.log(`Re-sent matched event to ${userId} with partner ${existingPartnerId}`);
-        
         return;
       } else {
-        console.log(`User ${userId} has stale connection to ${existingPartnerId} - removing`);
+        // Remove stale connection
         activeConnections.delete(userId);
         activeConnections.delete(existingPartnerId);
       }
@@ -175,39 +167,41 @@ io.on('connection', (socket) => {
     // Remove from waiting list if already waiting
     waitingUsers.delete(userId);
     
-    // Find any available partners (excluding self)
+    // Find available partners
     const availablePartners = Array.from(waitingUsers.entries())
       .filter(([partnerId, _]) => partnerId !== userId)
       .sort((a, b) => a[1].timestamp - b[1].timestamp); // Sort by waiting time
     
     if (availablePartners.length > 0) {
-      // Find the first available partner
+      // Get the first available partner
       const [partnerId, partnerData] = availablePartners[0];
       const partnerSocket = getSocketByUserId(partnerId);
       
-      // Check if partner socket is still valid
+      // Validate partner socket
       if (!partnerSocket || !partnerSocket.connected) {
         console.log(`Partner socket ${partnerId} is no longer valid - removing from waiting list`);
         waitingUsers.delete(partnerId);
+        
         // Add user to waiting list
         waitingUsers.set(userId, {
           socket: socket,
           timestamp: Date.now()
         });
-        console.log(`No valid partners available. User ${userId} added to waiting list.`);
+        
         emitWaitingCount();
         return;
       }
       
-      // Check if potential partner is already in an active connection
+      // Check if potential partner is already connected
       if (activeConnections.has(partnerId)) {
-        console.log(`Potential partner ${partnerId} is already in an active connection - skipping`);
+        console.log(`Potential partner ${partnerId} is already in an active connection`);
+        
         // Add user to waiting list
         waitingUsers.set(userId, {
           socket: socket,
           timestamp: Date.now()
         });
-        console.log(`User ${userId} added to waiting list. Waiting users: ${waitingUsers.size}`);
+        
         emitWaitingCount();
         return;
       }
@@ -221,24 +215,18 @@ io.on('connection', (socket) => {
       
       console.log(`Connection established between ${userId} and ${partnerId}`);
       
-      // Log this connection for debugging
+      // Log this connection
       connectionLog.set(`${userId}-${partnerId}`, {
         timestamp: Date.now(),
         initiator: userId
       });
       
-      // Make sure 'matched' events are delivered reliably
+      // Notify both users
       try {
-        // Send to current user
         socket.emit('matched', partnerId);
-        console.log(`Sent matched event to ${userId} with partner ${partnerId}`);
-        
-        // Send to partner
         partnerSocket.emit('matched', userId);
-        console.log(`Sent matched event to ${partnerId} with partner ${userId}`);
       } catch (err) {
         console.error('Error sending matched events:', err);
-        // Clean up the failed connection
         activeConnections.delete(userId);
         activeConnections.delete(partnerId);
       }
@@ -248,64 +236,93 @@ io.on('connection', (socket) => {
         socket: socket,
         timestamp: Date.now()
       });
-      console.log(`User ${userId} added to waiting list. Waiting users: ${waitingUsers.size}`);
+      console.log(`User ${userId} added to waiting list. Users waiting: ${waitingUsers.size}`);
     }
     
-    // Update waiting count for all users
+    // Broadcast waiting count
     emitWaitingCount();
   });
   
-  // Simplify WebRTC signaling handlers for more reliability
+  // WebRTC signaling handlers
   socket.on('webrtc_offer', (data) => {
-    console.log(`Received WebRTC offer from ${data.from} to ${data.to}`);
+    if (!data || !data.to) {
+      console.log('Invalid offer data received');
+      return;
+    }
+    
+    console.log(`Received WebRTC offer from ${data.from || socket.id} to ${data.to}`);
     
     // Forward the offer to the target user
     const targetSocket = getSocketByUserId(data.to);
-    if (targetSocket) {
-      // Simply forward the offer - trust the clients to handle their state
+    if (targetSocket && targetSocket.connected) {
+      // Make sure from is set correctly
+      if (!data.from) {
+        data.from = socket.id;
+      }
+      
       targetSocket.emit('webrtc_offer', data);
       console.log(`Forwarded WebRTC offer to ${data.to}`);
     } else {
       console.log(`Target user ${data.to} not found for WebRTC offer`);
-      // Notify sender that target is not available
       socket.emit('partner_disconnected');
     }
   });
   
   socket.on('webrtc_answer', (data) => {
-    console.log(`Received WebRTC answer from ${data.from} to ${data.to}`);
+    if (!data || !data.to) {
+      console.log('Invalid answer data received');
+      return;
+    }
+    
+    console.log(`Received WebRTC answer from ${data.from || socket.id} to ${data.to}`);
     
     // Forward the answer to the target user
     const targetSocket = getSocketByUserId(data.to);
-    if (targetSocket) {
+    if (targetSocket && targetSocket.connected) {
+      // Make sure from is set correctly
+      if (!data.from) {
+        data.from = socket.id;
+      }
+      
       targetSocket.emit('webrtc_answer', data);
       console.log(`Forwarded WebRTC answer to ${data.to}`);
     } else {
       console.log(`Target user ${data.to} not found for WebRTC answer`);
-      // Notify sender that target is not available
       socket.emit('partner_disconnected');
     }
   });
   
   socket.on('webrtc_ice_candidate', (data) => {
-    // Forward ICE candidate to the target user
+    if (!data || !data.to) {
+      console.log('Invalid ICE candidate data received');
+      return;
+    }
+    
+    // Forward the ICE candidate to the target user
     const targetSocket = getSocketByUserId(data.to);
-    if (targetSocket) {
+    if (targetSocket && targetSocket.connected) {
+      // Make sure from is set correctly
+      if (!data.from) {
+        data.from = socket.id;
+      }
+      
       targetSocket.emit('webrtc_ice_candidate', data);
+      // console.log(`Forwarded ICE candidate from ${data.from} to ${data.to}`);
     } else {
       console.log(`Target user ${data.to} not found for ICE candidate`);
     }
   });
   
-  // Simplified message handling
+  // Message handling
   socket.on('send_message', (data) => {
-    if (!data.to || !data.message) {
+    if (!data || !data.to || !data.message) {
       console.log('Invalid message format:', data);
       return;
     }
     
+    // Forward the message to the target user
     const targetSocket = getSocketByUserId(data.to);
-    if (targetSocket) {
+    if (targetSocket && targetSocket.connected) {
       targetSocket.emit('user_message', data.message);
       console.log(`Message forwarded from ${socket.id} to ${data.to}`);
     } else {
@@ -314,36 +331,36 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Add a keep-alive handler to reset timeouts
+  // Heartbeat response handler
   socket.on('heartbeat_response', () => {
     // Reset any connection timeouts
     console.log(`Heartbeat received from ${socket.id}`);
   });
   
-  // Improved disconnection handling
+  // Disconnection handler
   socket.on('disconnect', () => {
     const userId = socket.id;
     console.log('User disconnected:', userId);
     
-    // Clear the heartbeat interval
+    // Clean up intervals
     clearInterval(heartbeatInterval);
     
     // Remove from waiting list
     waitingUsers.delete(userId);
     
-    // Notify partner if in active connection
+    // Handle active connections
     if (activeConnections.has(userId)) {
       const partnerId = activeConnections.get(userId);
       const partnerSocket = getSocketByUserId(partnerId);
       
       console.log(`User ${userId} disconnected while connected to ${partnerId}`);
       
-      if (partnerSocket) {
+      if (partnerSocket && partnerSocket.connected) {
         partnerSocket.emit('partner_disconnected');
         console.log(`Notified partner ${partnerId} of disconnection`);
       }
       
-      // Remove the connection
+      // Remove connection
       activeConnections.delete(userId);
       activeConnections.delete(partnerId);
     }
@@ -351,17 +368,17 @@ io.on('connection', (socket) => {
     // Update waiting count
     emitWaitingCount();
   });
-  
-  // Periodically log connection stats
-  const statsInterval = setInterval(() => {
-    console.log(`===== CONNECTION STATS =====`);
-    console.log(`Waiting users: ${waitingUsers.size}`);
-    console.log(`Active connections: ${activeConnections.size / 2} pairs`);
-    console.log(`Connection log entries: ${connectionLog.size}`);
-    console.log(`============================`);
-  }, 30000); // Every 30 seconds
 });
 
+// Periodically log connection stats
+setInterval(() => {
+  console.log(`===== CONNECTION STATS =====`);
+  console.log(`Waiting users: ${waitingUsers.size}`);
+  console.log(`Active connections: ${activeConnections.size / 2} pairs`);
+  console.log(`============================`);
+}, 30000);
+
+// Start server
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
