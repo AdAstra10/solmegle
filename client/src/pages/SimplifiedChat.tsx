@@ -15,6 +15,7 @@ const rtcConfig: RTCConfiguration = {
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:stun5.l.google.com:19302' },
+    { urls: 'stun:openrelay.metered.ca:80' },
     // Add TURN servers for better NAT traversal
     {
       urls: 'turn:openrelay.metered.ca:80',
@@ -26,14 +27,9 @@ const rtcConfig: RTCConfiguration = {
       username: 'openrelayproject',
       credential: 'openrelayproject'
     },
-    // Additional reliable TURN servers
+    // Twilio TURN servers for greater reliability
     {
       urls: 'turn:global.turn.twilio.com:3478?transport=udp',
-      username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334a2cebc8b250621',
-      credential: 'w1WpauIZ6mkQ6K+G0vgvzBnMoFtF7t0FMnqQ+q+1Cjk='
-    },
-    {
-      urls: 'turn:global.turn.twilio.com:3478?transport=tcp',
       username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334a2cebc8b250621',
       credential: 'w1WpauIZ6mkQ6K+G0vgvzBnMoFtF7t0FMnqQ+q+1Cjk='
     }
@@ -41,7 +37,7 @@ const rtcConfig: RTCConfiguration = {
   iceCandidatePoolSize: 10,
   bundlePolicy: 'max-bundle' as RTCBundlePolicy,
   rtcpMuxPolicy: 'require' as RTCRtcpMuxPolicy,
-  iceTransportPolicy: 'all' // Try 'relay' if connections fail
+  iceTransportPolicy: 'all'
 };
 
 interface InitializeMediaStreamProps {
@@ -83,6 +79,9 @@ const SolmegleChat: React.FC = () => {
   const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pendingIceCandidatesRef = useRef<RTCIceCandidate[]>([]);
   const remoteDescriptionSetRef = useRef<boolean>(false);
+  const isSignalingInProgressRef = useRef<boolean>(false);
+  const lastOfferTimeRef = useRef<number>(0);
+  const recoveryAttemptsRef = useRef<number>(0);
 
   // WebRTC helper functions
   const cleanupPeerConnection = useCallback(() => {
@@ -507,46 +506,120 @@ const SolmegleChat: React.FC = () => {
         console.log('ICE connection state changed to:', peerConnection.iceConnectionState);
         
         // Handle disconnected, failed, or closed states
-        if (peerConnection.iceConnectionState === 'disconnected' ||
-            peerConnection.iceConnectionState === 'failed' ||
-            peerConnection.iceConnectionState === 'closed') {
+        if (peerConnection.iceConnectionState === 'disconnected') {
+          console.log('ICE connection disconnected - waiting to see if it recovers');
           
-          console.log('ICE connection problematic:', peerConnection.iceConnectionState);
+          // Set a timer to check if we recover naturally
+          setTimeout(() => {
+            if (peerConnectionRef.current && 
+                peerConnectionRef.current.iceConnectionState === 'disconnected') {
+              console.log('Still disconnected after timeout, attempting ICE restart');
+              
+              try {
+                // Try to restart ICE gathering
+                if (peerConnectionRef.current.signalingState === 'stable') {
+                  console.log('Restarting ICE in stable state');
+                  peerConnectionRef.current.restartIce();
+                  
+                  // Create a new offer with ICE restart if we're in a position to do so
+                  if (!isSignalingInProgressRef.current && 
+                      socketRef.current && 
+                      partnerIdRef.current && 
+                      Date.now() - lastOfferTimeRef.current > 3000) {
+                    
+                    isSignalingInProgressRef.current = true;
+                    console.log('Creating new offer with ICE restart');
+                    
+                    peerConnectionRef.current.createOffer({ iceRestart: true })
+                      .then(offer => {
+                        if (peerConnectionRef.current) {
+                          return peerConnectionRef.current.setLocalDescription(offer);
+                        }
+                      })
+                      .then(() => {
+                        if (socketRef.current && peerConnectionRef.current && partnerIdRef.current) {
+                          lastOfferTimeRef.current = Date.now();
+                          socketRef.current.emit('webrtc_offer', {
+                            from: socketRef.current.id,
+                            to: partnerIdRef.current,
+                            offer: peerConnectionRef.current.localDescription
+                          });
+                        }
+                        isSignalingInProgressRef.current = false;
+                      })
+                      .catch(err => {
+                        console.error('Error creating ICE restart offer:', err);
+                        isSignalingInProgressRef.current = false;
+                      });
+                  }
+                }
+              } catch (err) {
+                console.error('Error restarting ICE:', err);
+              }
+            }
+          }, 5000); // Give 5 seconds for natural recovery
           
-          // If connection failed, try to recover
-          if (peerConnection.iceConnectionState === 'failed') {
-            console.log('Connection failed, attempting to restart ICE');
+        } else if (peerConnection.iceConnectionState === 'failed') {
+          console.log('ICE connection failed - attempting recovery');
+          
+          recoveryAttemptsRef.current += 1;
+          
+          // If we've tried too many times, clean up and start fresh
+          if (recoveryAttemptsRef.current > 2) {
+            console.log('Too many recovery attempts, cleaning up connection');
+            cleanupPeerConnection();
             
+            // Try to reconnect after a brief delay
+            setTimeout(() => {
+              if (partnerIdRef.current && socketRef.current && socketRef.current.connected) {
+                console.log('Re-establishing connection after cleanup');
+                recoveryAttemptsRef.current = 0;
+                connectToPartner(partnerIdRef.current, true);
+              }
+            }, 1000);
+          } else {
             try {
               // Try to restart ICE gathering
+              console.log('Attempting ICE restart on failed connection');
               peerConnection.restartIce();
+              
+              // Create a new offer with ICE restart
+              if (peerConnection.signalingState === 'stable' &&
+                  socketRef.current && 
+                  partnerIdRef.current) {
+                  
+                isSignalingInProgressRef.current = true;
+                
+                peerConnection.createOffer({ iceRestart: true })
+                  .then(offer => {
+                    if (peerConnectionRef.current) {
+                      return peerConnectionRef.current.setLocalDescription(offer);
+                    }
+                  })
+                  .then(() => {
+                    if (socketRef.current && peerConnectionRef.current && partnerIdRef.current) {
+                      lastOfferTimeRef.current = Date.now();
+                      socketRef.current.emit('webrtc_offer', {
+                        from: socketRef.current.id,
+                        to: partnerIdRef.current,
+                        offer: peerConnectionRef.current.localDescription
+                      });
+                    }
+                    isSignalingInProgressRef.current = false;
+                  })
+                  .catch(err => {
+                    console.error('Error creating ICE restart offer:', err);
+                    isSignalingInProgressRef.current = false;
+                  });
+              }
             } catch (err) {
-              console.error('Error restarting ICE:', err);
+              console.error('Error handling failed ICE connection:', err);
             }
           }
-        }
-      });
-      
-      peerConnection.addEventListener('connectionstatechange', () => {
-        console.log('Connection state changed to:', peerConnection.connectionState);
-        
-        // Handle disconnected or failed states
-        if (peerConnection.connectionState === 'disconnected' ||
-            peerConnection.connectionState === 'failed' ||
-            peerConnection.connectionState === 'closed') {
-          
-          console.log('Connection state problematic:', peerConnection.connectionState);
-          
-          // Notify user that connection might be unstable
-          setErrorMessage('Connection unstable. You may need to refresh if video freezes.');
-          
-          // If failed completely, clean up
-          if (peerConnection.connectionState === 'failed') {
-            cleanupPeerConnection();
-          }
-        } else if (peerConnection.connectionState === 'connected') {
-          console.log('Successfully connected to peer!');
-          setErrorMessage('');
+        } else if (peerConnection.iceConnectionState === 'connected' || 
+                   peerConnection.iceConnectionState === 'completed') {
+          console.log('ICE connection established successfully');
+          recoveryAttemptsRef.current = 0;
         }
       });
       
@@ -1181,36 +1254,75 @@ const SolmegleChat: React.FC = () => {
           return;
         }
         
+        // If signaling is already in progress, log and prioritize
+        if (isSignalingInProgressRef.current) {
+          console.log("Signaling already in progress, handling with priority");
+        }
+        
+        isSignalingInProgressRef.current = true;
+        
         try {
           // Check the connection state to avoid errors
           const currentState = peerConnectionRef.current.signalingState;
-          if (currentState !== 'stable' && currentState !== 'have-local-offer') {
-            console.log(`Cannot set remote offer in state: ${currentState}, attempting to reset connection`);
+          
+          // Handle different signaling states appropriately
+          if (currentState === 'have-local-offer') {
+            // If we already have a local offer, see who should win based on ID comparison
+            const localSocketId = socketRef.current ? socketRef.current.id : '';
+            const remoteSocketId = data.from;
             
-            try {
-              // Try to reset the connection state if possible
-              if (currentState === 'have-remote-offer') {
-                console.log("Already have a remote offer, creating rollback");
-                await peerConnectionRef.current.setLocalDescription({type: 'rollback'} as RTCSessionDescription);
+            if (localSocketId && remoteSocketId) {
+              if (localSocketId > remoteSocketId) {
+                // Our ID is higher, so our offer should win - reject their offer
+                console.log("Collision detected, our offer takes precedence based on ID comparison");
+                isSignalingInProgressRef.current = false;
+                return;
+              } else {
+                // Their ID is higher, so their offer should win - rollback ours
+                console.log("Collision detected, their offer takes precedence, rolling back our offer");
+                try {
+                  await peerConnectionRef.current.setLocalDescription({type: 'rollback'} as RTCSessionDescription);
+                } catch (err) {
+                  console.error("Error rolling back local description:", err);
+                }
               }
+            }
+          } else if (currentState === 'have-remote-offer') {
+            console.log("Already have a remote offer, attempting rollback");
+            try {
+              await peerConnectionRef.current.setLocalDescription({type: 'rollback'} as RTCSessionDescription);
             } catch (err) {
-              console.error("Error resetting connection state:", err);
-              // In case of error, clean up and create a new connection
+              console.error("Error with rollback:", err);
+              // If rollback fails, restart with new connection
               cleanupPeerConnection();
               connectToPartner(data.from, false);
+              isSignalingInProgressRef.current = false;
+              return;
+            }
+          } else if (currentState !== 'stable') {
+            console.log(`Connection in ${currentState} state, not ideal for setting offer`);
+            
+            // For other non-stable states, try to get back to stable
+            if (peerConnectionRef.current.signalingState === 'closed') {
+              console.log("Connection is closed, creating new peer connection");
+              cleanupPeerConnection();
+              connectToPartner(data.from, false);
+              isSignalingInProgressRef.current = false;
               return;
             }
           }
           
           // Set the remote description from the offer
+          console.log("Setting remote description from offer");
           await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
-          console.log("Set remote description from offer");
+          console.log("Set remote description from offer successfully");
           remoteDescriptionSetRef.current = true;
           
           // Process any pending ICE candidates now
           if (pendingIceCandidatesRef.current.length > 0) {
             console.log(`Processing ${pendingIceCandidatesRef.current.length} pending ICE candidates after offer`);
             
+            // Process candidates sequentially with await to ensure order
             for (const candidate of pendingIceCandidatesRef.current) {
               try {
                 await peerConnectionRef.current.addIceCandidate(candidate);
@@ -1225,24 +1337,28 @@ const SolmegleChat: React.FC = () => {
           }
           
           // Create an answer
+          console.log("Creating answer");
           const answer = await peerConnectionRef.current.createAnswer();
+          console.log("Setting local description (answer)");
           await peerConnectionRef.current.setLocalDescription(answer);
           console.log("Created and set local answer");
           
           // Send the answer back
           if (socketRef.current && socketRef.current.connected) {
+            console.log("Sending answer to", data.from);
             socketRef.current.emit("webrtc_answer", {
               from: socketRef.current.id,
               to: data.from,
               answer: answer
             });
-            console.log("Sent answer to", data.from);
           } else {
             console.error("Socket not connected, cannot send answer");
           }
         } catch (err) {
           console.error("Error handling WebRTC offer:", err);
           setConnectionStatus(`Connection error. Try 'New Chat'.`);
+        } finally {
+          isSignalingInProgressRef.current = false;
         }
       };
 
@@ -1261,6 +1377,41 @@ const SolmegleChat: React.FC = () => {
             return;
           }
           
+          // Check signaling state before setting remote description
+          const currentState = peerConnectionRef.current.signalingState;
+          
+          if (currentState !== 'have-local-offer') {
+            console.warn(`Peer connection in ${currentState} state, not have-local-offer as expected for answer`);
+            
+            // If we're in stable state, we might have received the answer too late
+            if (currentState === 'stable') {
+              console.log("Already in stable state, answer may be redundant or arrived late");
+              return; // Ignore the answer if we're already in stable state
+            }
+            
+            // If we're in an unexpected state, try to recover
+            if (currentState === 'have-remote-offer') {
+              console.log("Have remote offer when expecting to set answer - state mismatch");
+              // We might need to create an answer instead, but let's not trigger here
+              return;
+            }
+            
+            // For closed state, we need to recreate the connection
+            if (currentState === 'closed') {
+              console.log("Connection closed, cannot set remote description");
+              // Reconnect if the connection was closed
+              if (partnerIdRef.current) {
+                cleanupPeerConnection();
+                setTimeout(() => {
+                  connectToPartner(partnerIdRef.current!, true);
+                }, 1000);
+              }
+              return;
+            }
+          }
+          
+          // Set the remote description from the answer
+          console.log("Setting remote description from answer");
           await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
           console.log("Successfully set remote description from answer");
           remoteDescriptionSetRef.current = true;
@@ -1282,9 +1433,56 @@ const SolmegleChat: React.FC = () => {
             // Clear the pending candidates
             pendingIceCandidatesRef.current = [];
           }
-        } catch (err) {
+        } catch (err: any) {
           console.error("Error handling WebRTC answer:", err);
-          setConnectionStatus(`Connection issue. Try 'New Chat'.`);
+          
+          // Instead of just showing error, attempt recovery
+          if (err.name === 'InvalidStateError' && peerConnectionRef.current) {
+            console.log("InvalidStateError when setting remote answer, attempting recovery");
+            
+            // If we already have a stable connection, it might be from a race condition
+            // where we received and processed the answer through a different path
+            if (peerConnectionRef.current.signalingState === 'stable') {
+              console.log("Connection already in stable state despite error - likely a race condition");
+              return;
+            }
+            
+            // For other state errors, try a delayed recovery
+            setTimeout(() => {
+              if (peerConnectionRef.current && partnerIdRef.current &&
+                  peerConnectionRef.current.signalingState !== 'closed') {
+                  
+                console.log("Attempting recovery after error with new offer");
+                
+                // Try to create a new offer to re-establish signaling
+                isSignalingInProgressRef.current = true;
+                
+                peerConnectionRef.current.createOffer({ iceRestart: true })
+                  .then(offer => {
+                    if (peerConnectionRef.current) {
+                      return peerConnectionRef.current.setLocalDescription(offer);
+                    }
+                  })
+                  .then(() => {
+                    if (socketRef.current && peerConnectionRef.current && partnerIdRef.current) {
+                      lastOfferTimeRef.current = Date.now();
+                      socketRef.current.emit('webrtc_offer', {
+                        from: socketRef.current.id,
+                        to: partnerIdRef.current,
+                        offer: peerConnectionRef.current.localDescription
+                      });
+                    }
+                    isSignalingInProgressRef.current = false;
+                  })
+                  .catch(err => {
+                    console.error('Error creating recovery offer:', err);
+                    isSignalingInProgressRef.current = false;
+                  });
+              }
+            }, 2000);
+          }
+          
+          setConnectionStatus(`Connection issue. Try 'New Chat' if video doesn't appear.`);
         }
       });
 
@@ -1325,7 +1523,7 @@ const SolmegleChat: React.FC = () => {
                   }
                 }
                 
-                // Clear pending candidates
+                // Clear the pending candidates
                 pendingIceCandidatesRef.current = [];
               }
             } else {
