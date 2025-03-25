@@ -622,7 +622,7 @@ const SimplifiedChat: React.FC = () => {
     // Socket connection events
     socket.on('connect', () => {
       console.log("Socket connected with ID:", socket.id);
-      setUserId(socket.id);
+      setUserId(socket.id || '');
       setConnectionStatus('Connected to server');
       setSocketConnected(true);
     });
