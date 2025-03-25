@@ -706,6 +706,18 @@ const SolmegleChat: React.FC = () => {
       return;
     }
     
+    // Add ICE candidate handler
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate && socketRef.current) {
+        console.log('New ICE candidate:', event.candidate.candidate.substr(0, 50) + '...');
+        socketRef.current.emit('webrtc_ice_candidate', {
+          from: socketRef.current.id,
+          to: partnerIdToConnect,
+          candidate: event.candidate
+        });
+      }
+    };
+    
     // Create and send offer if we're the initiator
     if (isInitiator) {
       console.log('Creating offer as initiator');
@@ -720,7 +732,8 @@ const SolmegleChat: React.FC = () => {
         await peerConnection.setLocalDescription(offer);
         
         console.log('Sending offer to partner');
-        socketRef.current.emit('offer', {
+        socketRef.current.emit('webrtc_offer', {
+          from: socketRef.current.id,
           to: partnerIdToConnect,
           offer: peerConnection.localDescription
         });
@@ -1192,22 +1205,43 @@ const SolmegleChat: React.FC = () => {
         try {
           // Save the partner ID from the offer
           setPartnerId(data.from);
+          partnerIdRef.current = data.from;
           
           if (!peerConnectionRef.current) {
             console.log("Creating new peer connection for offer");
-            // We need to create a new peer connection
-            if (typeof connectToPartner === 'function') {
-              connectToPartner(data.from, false);
-            } else {
-              console.error("connectToPartner function not available");
-              return;
-            }
+            // Create a new peer connection as non-initiator
+            connectToPartner(data.from, false);
+            
+            // Need to wait for the connection to be created
+            let attempts = 0;
+            const checkPeerConnection = setInterval(() => {
+              if (peerConnectionRef.current) {
+                clearInterval(checkPeerConnection);
+                handleIncomingOffer(data);
+              } else if (attempts >= 10) {
+                clearInterval(checkPeerConnection);
+                throw new Error("Failed to create peer connection for answer");
+              }
+              attempts++;
+            }, 200);
+          } else {
+            handleIncomingOffer(data);
           }
-          
-          if (!peerConnectionRef.current) {
-            throw new Error("Failed to create peer connection for answer");
-          }
-          
+        } catch (err) {
+          const error = err as Error;
+          console.error("Error handling WebRTC offer:", error);
+          setConnectionStatus(`Failed to establish connection: ${error.message}. Try 'New Chat'.`);
+        }
+      });
+      
+      // Handle the incoming offer separately to avoid duplicating code
+      const handleIncomingOffer = async (data: any) => {
+        if (!peerConnectionRef.current) {
+          console.error("No peer connection available to handle offer");
+          return;
+        }
+        
+        try {
           // Set the remote description from the offer
           await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
           console.log("Set remote description from offer");
@@ -1218,18 +1252,20 @@ const SolmegleChat: React.FC = () => {
           console.log("Created and set local answer");
           
           // Send the answer back
-          newSocket.emit("webrtc_answer", {
-            from: userId || newSocket.id,
-            to: data.from,
-            answer: answer
-          });
-          console.log("Sent answer to", data.from);
+          if (socketRef.current) {
+            socketRef.current.emit("webrtc_answer", {
+              from: socketRef.current.id,
+              to: data.from,
+              answer: answer
+            });
+            console.log("Sent answer to", data.from);
+          }
         } catch (err) {
           const error = err as Error;
-          console.error("Error handling WebRTC offer:", error);
-          setConnectionStatus(`Failed to establish connection: ${error.message}. Try 'New Chat'.`);
+          console.error("Error creating/sending answer:", error);
+          throw error;
         }
-      });
+      };
 
       newSocket.on("webrtc_answer", async (data: any) => {
         console.log("Received WebRTC answer from", data.from);
