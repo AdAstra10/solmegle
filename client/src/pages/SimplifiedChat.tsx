@@ -341,24 +341,33 @@ const SolmegleChat: React.FC = () => {
 
   // Helper function to find partner
   const findPartner = useCallback((socket: Socket) => {
-    console.log("Sending find_partner request with userId:", userId);
+    console.log("Sending find_partner request with socket ID:", socket.id);
     setIsConnecting(true);
     setIsSearchingForPartner(true);
     
-    // CRITICAL FIX: Enhanced reliability with confirmation and retry
+    // CRITICAL FIX: Enhanced reliability - always use socket.id as user ID
     try {
-      socket.emit("find_partner", userId, (ack: any) => {
+      // Now using {} as the data object and socket.id is automatically included
+      socket.emit("find_partner", {}, (ack: any) => {
         if (ack && ack.success) {
           console.log("Server acknowledged find_partner request");
+          setConnectionStatus("Looking for a partner...");
+        } else if (ack && ack.error) {
+          console.log("Server rejected find_partner request:", ack.error);
+          setConnectionStatus(`Server message: ${ack.error}`);
+          // Don't retry immediately on rejection
+          setTimeout(() => {
+            setIsConnecting(false);
+          }, 2000);
         } else {
           console.log("No acknowledgement for find_partner, will retry");
           // Retry after a short delay
           setTimeout(() => {
             if (socket.connected) {
               console.log("Retrying find_partner");
-              socket.emit("find_partner", userId);
+              socket.emit("find_partner", {});
             }
-          }, 1000);
+          }, 1500);
         }
       });
     } catch (error) {
@@ -367,11 +376,11 @@ const SolmegleChat: React.FC = () => {
       setTimeout(() => {
         if (socket.connected) {
           console.log("Retrying find_partner after error");
-          socket.emit("find_partner", userId);
+          socket.emit("find_partner", {});
         }
-      }, 1000);
+      }, 2000);
     }
-  }, [userId]);
+  }, []);
 
   // Create a WebRTC peer connection with better track handling
   const createPeerConnection = useCallback((isInitiator: boolean): RTCPeerConnection | null => {
@@ -1006,6 +1015,7 @@ const SolmegleChat: React.FC = () => {
   useEffect(() => {
     if (!socketRef.current) {
       console.log("Initializing socket connection");
+      // CRITICAL FIX: Use more reliable socket.io connection setup
       const newSocket = io(window.location.origin, {
         transports: ['websocket', 'polling'],
         upgrade: true,
@@ -1022,8 +1032,8 @@ const SolmegleChat: React.FC = () => {
       newSocket.on("connect", () => {
         console.log("Socket connected with ID:", newSocket.id);
         setConnectionStatus("Socket connected. Ready to find partners.");
-        // Set userId if not already set
-        if (newSocket.id && (!userId || userId.trim() === '')) {
+        // Set userId to socket.id for reliable reference
+        if (newSocket.id) {
           setUserId(newSocket.id);
         }
         
@@ -1094,14 +1104,15 @@ const SolmegleChat: React.FC = () => {
         }
         
         // CRITICAL FIX: Prevent multiple state updates causing camera glitching
-        if (isConnecting) {
-          console.log("Already in connecting state, will finish that first");
+        if (isConnecting && isActiveConnection) {
+          console.log("Already in connecting state, not starting another connection");
           return;
         }
         
         // Update state to show matched
         setConnectionStatus(`Matched with a partner! Setting up connection...`);
         setPartnerId(matchedPartnerId);
+        partnerIdRef.current = matchedPartnerId; // CRITICAL FIX: Update ref for consistent access
         setIsRealPartner(true);
         setIsActiveConnection(true);
         setIsConnecting(true);
@@ -1113,8 +1124,7 @@ const SolmegleChat: React.FC = () => {
           partnerConnectionTimeout.current = null;
         }
 
-        // CRITICAL FIX: Use a single approach to get camera access and create connection
-        // to avoid camera glitching from multiple simultaneous attempts
+        // CRITICAL FIX: Use a single approach to connect to partner
         const setupConnection = () => {
           console.log("Setting up connection as initiator with partner", matchedPartnerId);
           
@@ -1132,44 +1142,29 @@ const SolmegleChat: React.FC = () => {
             cleanupPeerConnection();
           }
           
-          // Now create the new connection with small delay to allow state to settle
+          // Now create the new connection
           setTimeout(() => {
             connectToPartner(matchedPartnerId, true);
-          }, 500);
+          }, 300);
         };
 
-        // If we don't have camera access yet, get it first
-        if (!userStreamRef.current) {
-          console.log("No local stream available, requesting camera access first");
-          // Ensure we're not already requesting camera
-          if (!isCameraAllowed) {
-            requestCameraAccess()
-              .then(() => {
-                console.log("Camera access granted, can now create WebRTC connection");
-                // Short delay to ensure stream is ready
-                setTimeout(setupConnection, 1000);
-              })
-              .catch(err => {
-                console.error("Failed to get camera access after match:", err);
-                setConnectionStatus("Camera access denied. Please enable camera and try again.");
-                setIsConnecting(false);
-              });
-          } else {
-            // Camera is allowed but stream not ready - wait a moment
-            console.log("Camera is allowed but stream not ready, waiting briefly");
-            setTimeout(() => {
-              if (userStreamRef.current) {
-                setupConnection();
-              } else {
-                console.error("Stream still not available after wait");
-                setConnectionStatus("Camera error. Please refresh the page.");
-                setIsConnecting(false);
-              }
-            }, 1000);
-          }
-        } else {
+        // If we have camera access, proceed with connection
+        if (userStreamRef.current) {
           console.log("Already have local stream, setting up connection");
           setupConnection();
+        } else {
+          // Request camera access first
+          console.log("No local stream available, requesting camera access first");
+          requestCameraAccess()
+            .then(() => {
+              console.log("Camera access granted, can now create WebRTC connection");
+              setTimeout(setupConnection, 500);
+            })
+            .catch(err => {
+              console.error("Failed to get camera access after match:", err);
+              setConnectionStatus("Camera access denied. Please enable camera and try again.");
+              setIsConnecting(false);
+            });
         }
       });
 

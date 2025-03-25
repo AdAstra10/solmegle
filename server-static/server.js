@@ -33,17 +33,36 @@ const connectionAttempts = new Map(); // userId -> {lastAttempt, count} - Tracki
 // Helper function to get a socket by user ID - simplified for reliability
 const getSocketByUserId = (userId) => {
   // Direct socket ID lookup is most reliable
-  return io.sockets.sockets.get(userId);
+  const socket = io.sockets.sockets.get(userId);
+  if (socket) {
+    return socket;
+  }
+  
+  // Fallback: look in waiting users map
+  const waitingUser = waitingUsers.get(userId);
+  if (waitingUser && waitingUser.socket) {
+    return waitingUser.socket;
+  }
+  
+  // Last resort: search through all sockets
+  for (const [id, socket] of io.sockets.sockets.entries()) {
+    if (id === userId || socket.userId === userId) {
+      return socket;
+    }
+  }
+  
+  console.log(`No socket found for user ID: ${userId}`);
+  return null;
 };
 
-// CRITICAL FIX: Add lockout checking to prevent rapid connection attempts
+// CRITICAL FIX: Check for connection lockout to prevent rapid reconnection attempts
 const isConnectionLocked = (userId) => {
   const now = Date.now();
   const lastAttempt = connectionAttempts.get(userId);
   
   if (lastAttempt) {
-    // If last attempt was less than 3 seconds ago, enforce lockout
-    if (now - lastAttempt.timestamp < 3000) {
+    // If last attempt was less than 1 second ago, enforce lockout (reduced from 3s)
+    if (now - lastAttempt.timestamp < 1000) {
       console.log(`Connection attempt from ${userId} locked out - too frequent`);
       return true;
     }
@@ -114,7 +133,7 @@ io.on('connection', (socket) => {
       const existingPartnerId = activeConnections.get(userId);
       const existingPartnerSocket = getSocketByUserId(existingPartnerId);
       
-      if (existingPartnerSocket) {
+      if (existingPartnerSocket && existingPartnerSocket.connected) {
         console.log(`User ${userId} already matched with ${existingPartnerId} - not matching again`);
         
         // Inform the client they're already connected
@@ -143,7 +162,7 @@ io.on('connection', (socket) => {
       const partnerSocket = getSocketByUserId(partnerId);
       
       // Check if partner socket is still valid
-      if (!partnerSocket) {
+      if (!partnerSocket || !partnerSocket.connected) {
         console.log(`Partner socket ${partnerId} is no longer valid - removing from waiting list`);
         waitingUsers.delete(partnerId);
         // Add user to waiting list
@@ -184,28 +203,20 @@ io.on('connection', (socket) => {
         initiator: userId
       });
       
-      // CRITICAL FIX: Send matched events with reliable delivery
+      // CRITICAL FIX: Make sure 'matched' events are delivered reliably
       try {
         // Send to current user
         socket.emit('matched', partnerId);
         console.log(`Sent matched event to ${userId} with partner ${partnerId}`);
         
-        // Send to partner with small delay to ensure proper sequencing
-        setTimeout(() => {
-          if (partnerSocket.connected) {
-            partnerSocket.emit('matched', userId);
-            console.log(`Sent matched event to ${partnerId} with partner ${userId}`);
-          } else {
-            console.log(`Partner socket ${partnerId} disconnected before match notification`);
-            // Clean up the failed connection
-            activeConnections.delete(userId);
-            activeConnections.delete(partnerId);
-            // Let the original user know
-            socket.emit('partner_disconnected');
-          }
-        }, 300);
+        // Send to partner
+        partnerSocket.emit('matched', userId);
+        console.log(`Sent matched event to ${partnerId} with partner ${userId}`);
       } catch (err) {
         console.error('Error sending matched events:', err);
+        // Clean up the failed connection
+        activeConnections.delete(userId);
+        activeConnections.delete(partnerId);
       }
     } else {
       // No partners available, add to waiting list
